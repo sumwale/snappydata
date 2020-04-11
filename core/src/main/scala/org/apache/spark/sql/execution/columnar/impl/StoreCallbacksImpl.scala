@@ -477,7 +477,7 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
     MemoryManagerCallback.memoryManager.
         dropStorageMemoryForObject(objectName, MemoryMode.ON_HEAP, ignoreBytes)
 
-  override def waitForRuntimeManager(maxWaitMillis: Long): Unit = {
+  override def waitForRuntimeManager(maxWaitMillis: Long): Boolean = {
     val memoryManager = MemoryManagerCallback.memoryManager
     if (memoryManager.bootManager) {
       val endWait = System.currentTimeMillis() + math.max(10, maxWaitMillis)
@@ -493,9 +493,10 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
           cache.getCancelCriterion.checkCancelInProgress(interrupt)
           if (interrupt ne null) Thread.currentThread().interrupt()
         }
-      } while (MemoryManagerCallback.memoryManager.bootManager &&
-          System.currentTimeMillis() < endWait)
+        if (System.currentTimeMillis() > endWait) return false
+      } while (MemoryManagerCallback.memoryManager.bootManager)
     }
+    true
   }
 
   override def resetMemoryManager(): Unit = MemoryManagerCallback.resetMemoryManager()

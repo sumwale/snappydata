@@ -18,6 +18,8 @@ package io.snappydata.quickstart
 
 import io.snappydata.SnappyTestRunner
 
+import org.apache.spark.sql.SparkSupport
+
 /**
  * Extending SnappyTestRunner. This class tests the old quickstart as well as
  * the examples enumerated in Snappy examples folder
@@ -29,7 +31,7 @@ class ExampleTestSuite extends SnappyTestRunner {
   val localLead = "localhost:8090"
   val snappyExamples = "org.apache.spark.examples.snappydata"
 
-  test("old quickstart") {
+  if (SparkSupport.isEnterpriseEdition) test("old quickstart") {
 
     SnappyShell("quickStartScripts", Seq("connect client 'localhost:1527';",
       s"run '$snappyHome/quickstart/scripts/create_and_load_column_table.sql';",
@@ -54,7 +56,6 @@ class ExampleTestSuite extends SnappyTestRunner {
     SparkSubmit("PythonAirlineDataApp", appClass = "", None,
       confs = Seq("snappydata.connection=localhost:1527", "spark.ui.port=4051"),
       appJar = s"$snappyHome/quickstart/python/AirlineDataPythonApp.py")
-
   }
 
   test("Create Table in Python") {

@@ -770,9 +770,7 @@ gradle.taskGraph.whenReady { graph ->
         } else if (test.name == 'dunitSecurityTest') {
           includes.clear()
           excludes.clear()
-          if (!rootProject.hasProperty('snappydata.enterprise')) {
-            excludes = [ '**/*Suite.class', '**/*DUnitSecurityTest.class', '**/*DUnitTest.class', '**/*DUnit.class' ]
-          } else if (dunitSecSingle == null || dunitSecSingle.length() == 0) {
+          if (dunitSecSingle == null || dunitSecSingle.length() == 0) {
             def dunitSecurityTests = testClassesDirs.asFileTree.matching {
               includes = [ '**/*DUnitSecurityTest.class' ]
               excludes = [ '**/*Suite.class', '**/*DUnitTest.class', '**/*DUnit.class' ]
@@ -906,14 +904,13 @@ task product(type: Zip) {
       targetProject = aqpProject
     }
 
-    if (hasJdbcConnectorProject){
-       dependsOn ":snappy-jdbc-connector_${scalaBinaryVersion}:jar"
+    if (hasJdbcConnectorProject) {
+      dependsOn ":snappy-jdbc-connector_${scalaBinaryVersion}:jar"
     }
-    if (hasGemFireConnectorProject){
-       dependsOn ":gemfire-connector:product"
+    if (hasGemFireConnectorProject) {
+      dependsOn ":gemfire-connector:product"
     }
   }
-
 
   // create snappydata+spark combined python zip
   destinationDir = file("${snappyProductDir}/python/lib")
@@ -1227,11 +1224,10 @@ buildDeb {
 }
 
 distTar {
-  // archiveName = 'TIB_compute-ce_' + version + '_' + osFamilyName + '.tar.gz'
   if (isEnterpriseProduct) {
     archiveName = 'TIB_compute_' + version + '_' + osFamilyName + '.tar.gz'
   } else {
-    classifier 'bin'
+    archiveName = 'snappydata_' + version + '_' + osFamilyName + '.tar.gz'
   }
   dependsOn product
   // also package VSD
@@ -1247,11 +1243,10 @@ distTar {
 }
 
 distZip {
-  // archiveName = 'TIB_compute-ce_' + version + '_' + osFamilyName + '.zip'
   if (isEnterpriseProduct) {
     archiveName = 'TIB_compute_' + version + '_' + osFamilyName + '.zip'
   } else {
-    classifier 'bin'
+    archiveName = 'snappydata_' + version + '_' + osFamilyName + '.zip'
   }
   dependsOn product
   // also package VSD
@@ -1283,7 +1278,7 @@ task jdbcJar {
 
   doLast {
     def jdbcProject = project(":snappy-jdbc_${scalaBinaryVersion}")
-    String jdbcName = "snappydata-jdbc_${scalaBinaryVersion}-${version}.jar"
+    String jdbcName = "snappydata-jdbc-${scalaBinaryVersion}_${version}.jar"
     if (isEnterpriseProduct) {
       jdbcName = "TIB_compute-jdbc-${scalaBinaryVersion}_${version}.jar"
     }

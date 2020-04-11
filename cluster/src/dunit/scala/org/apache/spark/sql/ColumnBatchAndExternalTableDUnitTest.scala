@@ -33,6 +33,8 @@ case class TestRecord(col1: Int, col2: Int, col3: Int)
 class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTestBase(s)
     with Assertions with Logging with SparkSupport {
 
+  self =>
+
   private def sqlExecutionIds(session: SparkSession): Set[Long] = {
     session.sharedState.statusStore.executionsList().map(_.executionId).toSet
   }
@@ -282,6 +284,14 @@ class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTest
     snc.sql("DROP TABLE IF EXISTS " + colTable)
   }
 
+  @volatile private var maxTasksStarted = 0
+  @volatile private var activeTasks = 0
+
+  private def resetTasks(): Unit = self.synchronized {
+    maxTasksStarted = 0
+    activeTasks = 0
+  }
+
   def testSessionConfigForCPUsPerTask(): Unit = {
     val netPort = AvailablePortHelper.getRandomAvailableTCPPort
     vm2.invoke(classOf[ClusterManagerTestBase], "startNetServer", netPort)
@@ -311,11 +321,8 @@ class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTest
     stmt.execute(s"create table airline_staging using parquet options (path '$targetDataFile') " +
         s"as select * from airline")
 
-    var maxTasksStarted = 0
-    var activeTasks = 0
-
     val listener = new SparkListener {
-      override def onTaskStart(taskStart: SparkListenerTaskStart): Unit = synchronized {
+      override def onTaskStart(taskStart: SparkListenerTaskStart): Unit = self.synchronized {
         if (taskStart.taskInfo ne null) {
           activeTasks += 1
           if (activeTasks > maxTasksStarted) {
@@ -324,9 +331,9 @@ class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTest
         }
       }
 
-      override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = synchronized {
+      override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = self.synchronized {
         if ((taskEnd.taskInfo ne null) && taskEnd.stageAttemptId != -1) {
-          activeTasks -= 1
+          if (activeTasks > 0) activeTasks -= 1
         }
       }
     }
@@ -337,22 +344,19 @@ class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTest
     // force linking of buckets to partitions to avoid de-linking complications
     stmt.execute("set snappydata.linkPartitionsToBuckets = true")
     // first confirm that number of tasks created at a time are same as sparkCores by default
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline")
     // should not deviate much though in rare cases few tasks can start/end slightly out of order
     assert(maxTasksStarted < sparkCores * 2)
     assert(maxTasksStarted > sparkCores / 2)
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline")
     assert(maxTasksStarted < sparkCores * 2)
     assert(maxTasksStarted > sparkCores / 2)
 
     // now check that max tasks are reduced with the session setting
     stmt.execute("set spark.task.cpus = 2")
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline")
     assert(maxTasksStarted < sparkCores)
     assert(maxTasksStarted > sparkCores / 4)
@@ -360,27 +364,23 @@ class ColumnBatchAndExternalTableDUnitTest(s: String) extends ClusterManagerTest
     // ---- Check implicit spark.task.cpus get set for file scans/inserts ----
     logInfo(s"Expected implicit spark.task.cpus = $implicitCpusToTasks")
     stmt.execute("set spark.task.cpus")
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline")
     assert(maxTasksStarted < sparkCores * 2)
     assert(maxTasksStarted > sparkCores / 2)
 
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline_staging")
     assert(maxTasksStarted < sparkCores * 2 / implicitCpusToTasks)
     assert(maxTasksStarted > sparkCores / (2 * implicitCpusToTasks))
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline_staging")
     assert(maxTasksStarted < sparkCores * 2 / implicitCpusToTasks)
     assert(maxTasksStarted > sparkCores / (2 * implicitCpusToTasks))
 
     // ---- Check explicit spark.task.cpus overrides implicit spark.task.cpus ----
     stmt.execute("set spark.task.cpus = 1")
-    maxTasksStarted = 0
-    activeTasks = 0
+    resetTasks()
     stmt.execute("select avg(depDelay) from airline_staging")
     assert(maxTasksStarted < sparkCores * 2)
     assert(maxTasksStarted > sparkCores / 2)

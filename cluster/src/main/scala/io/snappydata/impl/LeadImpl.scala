@@ -163,13 +163,7 @@ class LeadImpl extends ServerImpl with Lead
     val storeProperties = ServiceUtils.getStoreProperties(bootProperties.stringPropertyNames()
         .iterator().asScala.map(k => k -> bootProperties.getProperty(k)).toSeq)
 
-    val productName = {
-      if (SparkSupport.isEnterpriseEdition) {
-        "TIBCO ComputeDB"
-      } else {
-        "SnappyData"
-      }
-    }
+    val productName = if (SparkSupport.isEnterpriseEdition) "TIBCO ComputeDB" else "SnappyData"
 
     // initialize store and Spark in parallel (Spark will wait in
     // cluster manager start on internalStart)
@@ -458,10 +452,6 @@ class LeadImpl extends ServerImpl with Lead
           !"NONE".equalsIgnoreCase(authP)) {
         throw new UnsupportedOperationException(
           "LDAP is the only supported auth-provider currently.")
-      }
-      if (authP != null && !SparkSupport.isEnterpriseEdition) {
-        throw new UnsupportedOperationException("Security feature is available in SnappyData " +
-            "Enterprise Edition.")
       }
     }
   }

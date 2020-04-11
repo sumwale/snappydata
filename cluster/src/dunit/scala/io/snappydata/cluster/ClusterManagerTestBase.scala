@@ -73,6 +73,9 @@ abstract class ClusterManagerTestBase(s: String)
   bootProps.setProperty("member-timeout", "5000")
   bootProps.setProperty("snappydata.sql.planCaching", random.nextBoolean().toString)
 
+  // disable embedded thrift server on lead
+  // SW: bootProps.setProperty("snappydata.hiveServer.enabled", "false")
+
   // reduce startup time
   // sysProps.setProperty("p2p.discoveryTimeout", "1000")
   // sysProps.setProperty("p2p.joinTimeout", "2000")

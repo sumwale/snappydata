@@ -338,7 +338,7 @@ class SnappyUnifiedMemoryManager private[memory](
           if (!askStoragePool(toOwner, MemoryManagerCallback.storageBlockId,
             totalSize, MemoryMode.OFF_HEAP, shouldEvict = true)) {
             throw DirectBufferAllocator.instance().lowMemoryException(
-              "changeToStorage", totalSize)
+              "changeOwnerToStorage", totalSize)
           }
           // release from execution pool if using execution allocator
           runnable match {

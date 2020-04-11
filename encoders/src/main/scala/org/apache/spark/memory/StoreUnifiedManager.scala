@@ -230,11 +230,11 @@ final class DefaultMemoryConsumer(taskMemoryManager: TaskMemoryManager,
 final class ExecutionFreeMemory(consumer: DefaultMemoryConsumer,
     address: Long) extends FreeMemory(address) {
 
-  override protected def objectName(): String = BufferAllocator.EXECUTION
+  override protected def owner(): String = BufferAllocator.EXECUTION
 
-  override def run() {
-    val address = tryFree()
-    if (address != 0) {
+  override def run(): Unit = {
+    val address = getAndResetAddress()
+    if (address != 0L) {
       Platform.freeMemory(address)
       releaseExecutionMemory()
     }

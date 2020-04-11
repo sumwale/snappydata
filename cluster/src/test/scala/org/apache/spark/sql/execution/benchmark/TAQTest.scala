@@ -276,11 +276,9 @@ object TAQTest extends Logging with Assertions {
     val conf = new SparkConf()
         .setIfMissing("spark.master", s"local[$cores]")
         .setAppName("microbenchmark")
-    conf.set("snappydata.store.critical-heap-percentage", "95")
-    if (SparkSupport.isEnterpriseEdition) {
-      conf.set("snappydata.store.memory-size", "1200m")
-    }
-    conf.set("spark.memory.manager", classOf[SnappyUnifiedMemoryManager].getName)
+        .set("snappydata.store.critical-heap-percentage", "95")
+        .set("snappydata.store.memory-size", "1200m")
+        .set("spark.memory.manager", classOf[SnappyUnifiedMemoryManager].getName)
         .set("spark.serializer", "org.apache.spark.serializer.PooledKryoSerializer")
         .set("spark.closure.serializer", "org.apache.spark.serializer.PooledKryoSerializer")
         .set("snappydata.sql.planCaching", random.nextBoolean().toString)

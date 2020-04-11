@@ -252,7 +252,9 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
     @transient private[sql] var valueEquals: Boolean = false)
     extends TokenizedLiteral with KryoSerializable {
 
-  override def nullable: Boolean = dataType eq NullType
+  override def nullable: Boolean = (dataType eq NullType) || value == null
+
+  override lazy val resolved: Boolean = true
 
   override def eval(input: InternalRow): Any = value
 

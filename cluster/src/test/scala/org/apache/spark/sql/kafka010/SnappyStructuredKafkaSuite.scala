@@ -17,18 +17,20 @@
 
 package org.apache.spark.sql.kafka010
 
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
-import io.snappydata.{Property, SnappyFunSuite}
+import io.snappydata.SnappyFunSuite
+import org.apache.commons.io.FileUtils
 import org.apache.kafka.common.TopicPartition
 import org.scalatest.concurrent.Eventually
 import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
 import org.apache.spark.sql.functions.{count, window}
-import org.apache.spark.sql.streaming.ProcessingTime
+import org.apache.spark.sql.streaming.Trigger
 
 case class Account(accountName: String)
 
@@ -39,7 +41,7 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
 
   private var kafkaTestUtils: KafkaTestUtils = _
 
-  protected override def newSparkConf(addOn: (SparkConf) => SparkConf): SparkConf = {
+  protected override def newSparkConf(addOn: SparkConf => SparkConf): SparkConf = {
     super.newSparkConf((conf: SparkConf) => {
       // conf.set(Property.TestDisableCodeGenFlag.name , "false")
       conf
@@ -85,9 +87,9 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
       .option("kafka.bootstrap.servers", kafkaTestUtils.brokerAddress)
       .option("subscribe", topic)
       .option("startingOffsets", "earliest")
-      .load
+      .load()
 
-    implicit val encoder = RowEncoder(snc.table("users").schema)
+    implicit val encoder: ExpressionEncoder[Row] = RowEncoder(snc.table("users").schema)
 
     val streamingQuery = streamingDF
         .selectExpr("CAST(value AS STRING)")
@@ -100,13 +102,17 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
       .format("snappysink")
       .queryName("simple")
       .outputMode("append")
-      .trigger(ProcessingTime("1 seconds"))
+      .trigger(Trigger.ProcessingTime("1 seconds"))
       .option("tablename", "APP.USERS").option("streamqueryid", "abc")
       .option("checkpointLocation", "/tmp/snappyTable")
-      .start
+      .start()
 
     streamingQuery.processAllAvailable()
     assert(113 == session.sql("select * from APP.USERS").count)
+
+    streamingQuery.stop()
+
+    FileUtils.deleteQuietly(new File("/tmp/snappyTable"))
   }
 
 
@@ -124,6 +130,10 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
 
     val startingOffsets = JsonUtils.partitionOffsets(partitions)
 
+    kafkaTestUtils.sendMessages(topic, (100 to 200).map(_.toString).toArray, Some(0))
+    kafkaTestUtils.sendMessages(topic, (10 to 20).map(_.toString).toArray, Some(1))
+    kafkaTestUtils.sendMessages(topic, Array("1"), Some(2))
+
     val streamingDF = session
       .readStream
       .format("kafka")
@@ -132,25 +142,22 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
       .option("maxOffsetsPerTrigger", 10)
       .option("subscribe", topic)
       .option("startingOffsets", startingOffsets)
-      .load
+      .load()
 
     val streamingQuery = streamingDF
       .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
       .as[(String, String)]
       .writeStream
       .format("memory")
-     // .option("checkpointLocation", "/tmp/etl")
       .queryName("snappyTable")
       .outputMode("append")
-      .trigger(ProcessingTime("1 seconds"))
-      .start
-
-    kafkaTestUtils.sendMessages(topic, (100 to 200).map(_.toString).toArray, Some(0))
-    kafkaTestUtils.sendMessages(topic, (10 to 20).map(_.toString).toArray, Some(1))
-    kafkaTestUtils.sendMessages(topic, Array("1"), Some(2))
+      .trigger(Trigger.ProcessingTime("100 milliseconds"))
+      .start()
 
     streamingQuery.processAllAvailable()
     assert(113 == session.sql("select * from snappyTable").count)
+
+    streamingQuery.stop()
   }
 
   test("infinite streaming aggregation") {
@@ -167,36 +174,40 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
 
     val startingOffsets = JsonUtils.partitionOffsets(partitions)
 
+    kafkaTestUtils.sendMessages(topic, (100 to 150).map(_.toString).toArray, Some(0))
+    kafkaTestUtils.sendMessages(topic, (125 to 150).map(_.toString).toArray, Some(1))
+    kafkaTestUtils.sendMessages(topic, (100 to 124).map(_.toString).toArray, Some(2))
+
     val streamingDF = session
       .readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", kafkaTestUtils.brokerAddress)
       .option("kafka.metadata.max.age.ms", "1")
-      .option("maxOffsetsPerTrigger", 10)
       .option("subscribe", topic)
       .option("startingOffsets", startingOffsets)
       .option("failOnDataLoss", "false")
-      .load
+      .load()
 
+    val cpDir = "/tmp/infinite-" + System.currentTimeMillis()
     val streamingQuery = streamingDF
       .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)").groupBy("value").count()
       .as[(String, String)]
       .writeStream
       .format("memory")
-      .option("checkpointLocation", "/tmp/infinite-" + System.currentTimeMillis())
+      .option("checkpointLocation", cpDir)
       .queryName("snappyAggrTable")
       .outputMode("complete")
-      .trigger(ProcessingTime("1 seconds"))
-      .start
-
-    kafkaTestUtils.sendMessages(topic, (100 to 150).map(_.toString).toArray, Some(0))
-    kafkaTestUtils.sendMessages(topic, (125 to 150).map(_.toString).toArray, Some(1))
-    kafkaTestUtils.sendMessages(topic, (100 to 124).map(_.toString).toArray, Some(2))
+      .trigger(Trigger.ProcessingTime("1 seconds"))
+      .start()
 
     streamingQuery.processAllAvailable()
 
     assert(51 == session.sql("select * from snappyAggrTable").count)
     assert(2.0 == session.sql("select avg(count) from snappyAggrTable").collect()(0).getDouble(0))
+
+    streamingQuery.stop()
+
+    FileUtils.deleteQuietly(new File(cpDir))
   }
 
   test("sliding window aggregation") {
@@ -226,7 +237,7 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
       .option("subscribe", topic)
       .option("startingOffsets", startingOffsets)
       .option("failOnDataLoss", "false")
-      .load
+      .load()
 
     val windowedAggregation = streamingDF
       .groupBy(window($"timestamp", "1 seconds") as 'window)
@@ -243,7 +254,10 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
 
     streamingQuery.processAllAvailable()
     logInfo(session.sql("select * from snappyWindowAggrTable").limit(200).collect().mkString("\n"))
+
     streamingQuery.stop()
+
+    FileUtils.deleteQuietly(new File("/tmp/snappyWindowAggrTable"))
   }
 
   test("streaming join to snappy table") {
@@ -260,28 +274,30 @@ class SnappyStructuredKafkaSuite extends SnappyFunSuite with Eventually
     val topic = newTopic()
     kafkaTestUtils.createTopic(topic, partitions = 3)
 
+    kafkaTestUtils.sendMessages(topic, (10 to 18).map(_.toString).toArray, Some(1))
+    kafkaTestUtils.sendMessages(topic, (20 to 30).map(_.toString).toArray, Some(2))
+
     // Read the accounts from Kafka source
     val acctStreamingDF = session
       .readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", kafkaTestUtils.brokerAddress)
       .option("subscribe", topic)
-      .option("startingOffsets", "earliest").load
-      .selectExpr("CAST(value AS STRING) accountName").as[(String)]
+      .option("startingOffsets", "earliest").load()
+      .selectExpr("CAST(value AS STRING) accountName").as[String]
 
     val streamingQuery = acctStreamingDF.join(session.table("blacklist"), "accountName")
       .writeStream
       .outputMode("append")
       .format("memory")
       .queryName("snappyResultTable")
-      .trigger(ProcessingTime("1 seconds"))
-      .start
-
-    kafkaTestUtils.sendMessages(topic, (10 to 18).map(_.toString).toArray, Some(1))
-    kafkaTestUtils.sendMessages(topic, (20 to 30).map(_.toString).toArray, Some(2))
+      .trigger(Trigger.ProcessingTime("1 seconds"))
+      .start()
 
     streamingQuery.processAllAvailable()
     assert(10 == session.sql("select * from snappyResultTable").count)
+
+    streamingQuery.stop()
   }
 
   // Unsupported operations with streaming DataFrames/Datasets -

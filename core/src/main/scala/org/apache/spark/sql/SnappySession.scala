@@ -24,6 +24,7 @@ import java.util.{Calendar, Properties}
 import scala.collection.JavaConverters._
 import scala.concurrent.Future
 import scala.language.implicitConversions
+import scala.reflect.ClassTag
 import scala.reflect.runtime.universe.{TypeTag, typeOf}
 
 import com.gemstone.gemfire.internal.cache.{GemFireCacheImpl, PartitionedRegion}
@@ -41,7 +42,7 @@ import org.apache.spark.annotation.{DeveloperApi, Experimental}
 import org.apache.spark.jdbc.{ConnectionConf, ConnectionUtil}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.scheduler.SparkListenerEvent
-import org.apache.spark.sql.catalyst.analysis.{Analyzer, NoSuchTableException, UnresolvedAttribute, UnresolvedRelation, UnresolvedStar}
+import org.apache.spark.sql.catalyst.analysis.{NoSuchTableException, UnresolvedAttribute, UnresolvedRelation, UnresolvedStar}
 import org.apache.spark.sql.catalyst.catalog.{BucketSpec, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.encoders._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
@@ -60,6 +61,7 @@ import org.apache.spark.sql.execution.datasources.jdbc.{JDBCOptions, JdbcUtils}
 import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, LogicalRelation}
 import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
+import org.apache.spark.sql.execution.streaming.StreamingQueryListenerBus
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 import org.apache.spark.sql.hive.{HiveClientUtil, SnappySessionState}
 import org.apache.spark.sql.internal.StaticSQLConf.SCHEMA_STRING_LENGTH_THRESHOLD
@@ -67,6 +69,7 @@ import org.apache.spark.sql.internal.{BypassRowLevelSecurity, MarkerForCreateTab
 import org.apache.spark.sql.row.{JDBCMutableRelation, SnappyStoreDialect}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.store.StoreUtils
+import org.apache.spark.sql.streaming.{StreamingQueryListener, StreamingQueryManager}
 import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.Time
@@ -91,7 +94,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
 
   private[this] val tempCacheIndex = new AtomicInteger(0)
 
-  new FinalizeSession(this)
+  private[this] var finalizer = new FinalizeSession(this)
 
   /**
    * State shared across sessions, including the [[SparkContext]], cached data, listener,
@@ -207,11 +210,14 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
 
   final def prepareSQL(sqlText: String, skipPromote: Boolean = false): LogicalPlan = {
     val logical = snappySessionState.snappySqlParser.parsePlan(sqlText, clearExecutionData = true)
+    snappySessionState.executePlan(logical).analyzed
+    /*
     SparkSession.setActiveSession(this)
     val ap: Analyzer = sessionState.analyzer
     // logInfo(s"KN: Batches ${ap.batches.filter(
     //  _.name.equalsIgnoreCase("Resolution")).mkString("_")}")
     ap.execute(logical)
+    */
   }
 
   private[sql] final def executePlan(plan: LogicalPlan, retryCnt: Int = 0): QueryExecution = {
@@ -693,6 +699,13 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     externalCatalog match {
       case c: SmartConnectorExternalCatalog => c.close()
       case _ => // nothing for global embedded catalog
+    }
+
+    val finalizer = this.finalizer
+    if (finalizer ne null) {
+      finalizer.doFinalize()
+      finalizer.clearAll()
+      this.finalizer = null
     }
   }
 
@@ -2051,13 +2064,40 @@ private class FinalizeSession(session: SnappySession)
 
   private var sessionId = session.id
 
+  private var listenerBus: Option[StreamingQueryListenerBus] = None
+  private var listeners: Seq[StreamingQueryListener] = Nil
+
+  // Doing this clean up in finalizer as lifecycle of the listener is aligned with session's
+  // lifecycle. After this the listener object will be eligible for GC in the next cycle.
+  // Also the memory footprint of the listener object is not much hence it should be ok if the
+  // listener object is remain alive for one extra GC cycle as compared to the session.
+  def registerStreamingListeners(streamingManager: StreamingQueryManager): Unit = {
+    this.listenerBus = None
+    this.listeners = Nil
+    val m = SnappySession.listenerBusMethod
+    if (m ne null) {
+      val l = m.invoke(streamingManager).asInstanceOf[StreamingQueryListenerBus]
+      if (l ne null) {
+        implicit val tag: ClassTag[Any] = SnappySession.listenerTag
+        this.listenerBus = Some(l)
+        this.listeners = l.findListenersByClass()
+      }
+    }
+  }
+
   override def getHolder: FinalizeHolder = FinalizeObject.getServerHolder
 
-  override protected def doFinalize(): Boolean = {
+  override def doFinalize(): Boolean = {
     if (sessionId != SnappySession.INVALID_ID) {
       SnappySession.clearSessionCache(sessionId)
       sessionId = SnappySession.INVALID_ID
     }
+    listenerBus match {
+      case Some(l) if listeners.nonEmpty => listeners.foreach(l.removeListener)
+      case _ =>
+    }
+    listenerBus = None
+    listeners = Nil
     true
   }
 
@@ -2081,6 +2121,17 @@ object SnappySession extends Logging {
     """(cannot resolve ')(\w+).(\w+).*(' given input columns.*)""".r
   private val unresolvedColRegex =
     """(cannot resolve '`)(\w+).(\w+).(\w+)(.*given input columns.*)""".r
+
+  private[sql] lazy val (listenerBusMethod, listenerTag) = {
+    try {
+      val m = classOf[StreamingQueryManager].getDeclaredMethod("listenerBus")
+      m.setAccessible(true)
+      (m, ClassTag[Any](org.apache.spark.util.Utils.classForName(
+        "org.apache.spark.sql.streaming.SnappyStreamingQueryListener")))
+    } catch {
+      case _: Exception => (null, null)
+    }
+  }
 
   def tableIdentifier(table: String, catalog: SnappySessionCatalog,
       resolve: Boolean): TableIdentifier = {

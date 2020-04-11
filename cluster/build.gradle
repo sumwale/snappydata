@@ -205,9 +205,6 @@ scalaTest {
     cleanIntermediateFiles(project.path)
   }
 }
-check.dependsOn test, scalaTest, dunitTest
-if (rootProject.hasProperty('snappydata.enterprise')) {
-    check.dependsOn dunitSecurityTest
-}
+check.dependsOn test, scalaTest, dunitTest, dunitSecurityTest
 
 archivesBaseName = 'snappydata-cluster_' + scalaBinaryVersion

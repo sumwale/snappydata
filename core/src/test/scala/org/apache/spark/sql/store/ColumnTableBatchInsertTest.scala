@@ -18,7 +18,6 @@ package org.apache.spark.sql.store
 
 import scala.collection.mutable
 
-import io.snappydata.SnappyFunSuite.waitForCriterion
 import io.snappydata.core.{Data, TestData}
 import io.snappydata.{ConcurrentOpsTests, SnappyFunSuite}
 import org.scalatest.{Assertions, BeforeAndAfter}
@@ -468,7 +467,7 @@ object ColumnTableBatchInsertTest extends Assertions with SparkSupport {
   private def waitForRDDInfos(sc: SparkContext, expectedSize: Int,
       message: String): Seq[RDDStorageInfo] = {
     var rddInfos: Seq[RDDStorageInfo] = null
-    waitForCriterion({
+    SnappyFunSuite.waitForCriterion({
       rddInfos = internals.getCachedRDDInfos(sc)
       rddInfos.length == expectedSize
     }, message)
