@@ -855,7 +855,8 @@ private[sql] case object PrePutCheck extends (LogicalPlan => Unit) {
 
   def apply(plan: LogicalPlan): Unit = {
     plan.foreach {
-      case PutIntoTable(l: LogicalRelation, query) if l.relation.isInstanceOf[RowPutRelation] =>
+      case PutIntoTable(l: LogicalRelation, query)
+        if l.relation.isInstanceOf[RowPutRelation] || l.relation.isInstanceOf[BulkPutRelation] =>
         // Get all input data source relations of the query.
         val srcRelations = query.collect {
           case l: LogicalRelation => l.relation

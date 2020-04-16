@@ -186,15 +186,12 @@ class UpdateStatementTypeCastingSuite extends SnappyFunSuite with BeforeAndAfter
     val snappySession = snc.snappySession
     val state = snappySession.sessionState
     val analyzer = new Analyzer(state.catalog, state.conf)
-    val snappyAnalyzer = new Analyzer(state.catalog, state.conf)
-        with SnappyAnalyzer {
+    val snappyAnalyzer = new SnappyAnalyzer(state.catalog, state.conf) {
 
       override def session: SnappySession = snappySession
-
-      override lazy val baseAnalyzerInstance: Analyzer = analyzer
     }
     assertEquals(analyzer.batches.size, snappyAnalyzer.batches.size)
-    for ((expBatch, actBatch) <- analyzer.batches zip snappyAnalyzer.baseAnalyzerInstance.batches) {
+    for ((expBatch, actBatch) <- analyzer.batches zip snappyAnalyzer.baseBatches) {
       assertEquals(expBatch.name, actBatch.name)
       assertEquals(expBatch.strategy.toString, actBatch.strategy.toString)
       for ((exp, act) <- expBatch.rules zip actBatch.rules) {

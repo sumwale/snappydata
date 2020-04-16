@@ -620,9 +620,11 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
           d.copy(child = Project(keyAttrs, newChild),
             keyColumns = keyAttrs.map(_.toAttribute))
         }
-      case d@DeleteFromTable(table, child) if table.resolved && child.resolved =>
+      case d@DeleteFromTable(table, child) if table.resolved && child.resolved &&
+          !session.isPreparePhase =>
         ColumnTableBulkOps.transformDeletePlan(session, d)
-      case p@PutIntoTable(table, child) if table.resolved && child.resolved =>
+      case p@PutIntoTable(table, child) if table.resolved && child.resolved &&
+          !session.isPreparePhase =>
         ColumnTableBulkOps.transformPutPlan(session, p)
     }
   }
@@ -653,7 +655,6 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
 
   override final def executePlan(plan: LogicalPlan): QueryExecution = {
     clearExecutionData()
-    beforeExecutePlan(plan)
     val qe = newQueryExecution(plan)
     if (enableExecutionCache) executionCache.put(plan, qe)
     qe
@@ -666,9 +667,6 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
     experimentalMethods.extraStrategies = experimentalMethods.extraStrategies ++
         internals.hiveConditionalStrategies(this) ++
         Seq(SnappyStrategies, new StoreStrategy(this), StreamQueryStrategy) ++ storeOptimizedRules
-  }
-
-  protected def beforeExecutePlan(plan: LogicalPlan): Unit = {
   }
 
   private[sql] def getExecution(plan: LogicalPlan): QueryExecution = executionCache.get(plan)
@@ -731,14 +729,12 @@ class HiveConditionalStrategy(strategy: HiveStrategies => Strategy, state: Snapp
   }
 }
 
-
-trait SnappyAnalyzer extends Analyzer with SparkSupport {
+abstract class SnappyAnalyzer(catalog: SessionCatalog, conf: SQLConf)
+    extends SnappyAnalyzerBase(catalog, conf) with SparkSupport {
 
   def session: SnappySession
 
-  val baseAnalyzerInstance: Analyzer
-
-  override lazy val batches: Seq[Batch] = baseAnalyzerInstance.batches.map {
+  override lazy val batches: Seq[Batch] = baseBatches.map {
     case batch if batch.name.equalsIgnoreCase("Resolution") =>
       val rules = internals.addStringPromotionRules(batch.rules, this, session.sessionState.conf)
       Batch(batch.name, batch.strategy.asInstanceOf[Strategy], rules: _*)
@@ -773,11 +769,11 @@ trait SnappyAnalyzer extends Analyzer with SparkSupport {
   }
 
   /*
-    SnappyPromoteStrings is applied before Spark's org.apache.spark.sql.catalyst.analysis.TypeCoercion.PromoteStrings rule.
+    SnappyPromoteStrings is applied before Spark's TypeCoercion.PromoteStrings rule.
     Spark PromoteStrings rule causes issues in prepared statements by replacing ParamLiteral
     with NULL in case of BinaryComparison with left node being StringType and right being
-    ParamLiteral (or vice-versa) as by default ParamLiteral datatype is NullType. In such a case, this rule
-    converts ParmaLiteral type to StringType to prevent it being replaced by NULL
+    ParamLiteral (or vice-versa) as by default ParamLiteral data type is NullType. In such a case,
+    this rule converts ParamLiteral type to StringType to prevent it being replaced by NULL
    */
   object SnappyPromoteStrings extends Rule[LogicalPlan] with SparkSupport {
     override def apply(plan: LogicalPlan): LogicalPlan = {
@@ -818,7 +814,7 @@ object QuestionMark {
   def unapply(p: ParamLiteral): Option[Int] = {
     if (p.pos == 0 && (p.dataType == NullType || p.dataType == StringType)) {
       p.value match {
-        case r: Row => Some(r.getInt(0))
+        case i: MutableInt => Some(i.value)
         case _ => None
       }
     } else None

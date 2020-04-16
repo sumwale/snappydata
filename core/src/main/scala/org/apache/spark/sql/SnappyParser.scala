@@ -24,7 +24,6 @@ import scala.util.{Failure, Success, Try}
 
 import com.gemstone.gemfire.internal.shared.ClientSharedUtils
 import com.google.common.primitives.Ints
-import io.snappydata.sql.catalog.CatalogObjectType
 import io.snappydata.{Property, QueryHint}
 import org.parboiled2._
 import shapeless.{::, HNil}
@@ -37,7 +36,7 @@ import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, _}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.execution.command._
-import org.apache.spark.sql.execution.{PutIntoValuesColumnTable, ShowSnappyTablesCommand, ShowViewsCommand}
+import org.apache.spark.sql.execution.{ShowSnappyTablesCommand, ShowViewsCommand}
 import org.apache.spark.sql.internal.LikeEscapeSimplification
 import org.apache.spark.sql.sources.{Delete, DeleteFromTable, PutIntoTable, Update}
 import org.apache.spark.sql.streaming.WindowLogicalPlan
@@ -74,13 +73,15 @@ class SnappyParser(session: SnappySession)
     tokenize = false
   }
 
-  private[sql] def setPreparedQuery(preparePhase: Boolean, paramSet: Option[_]): Unit = {
+  private[sql] final def isPreparePhase: Boolean = _isPreparePhase
+
+  private[sql] final def setPreparedQuery(preparePhase: Boolean, paramSet: Option[_]): Unit = {
     _isPreparePhase = preparePhase
     _parameterValueSet = paramSet
     if (preparePhase) _preparedParamsTypesInfo = None
   }
 
-  private[sql] def setPrepareParamsTypesInfo(info: Array[Int]): Unit = {
+  private[sql] final def setPrepareParamsTypesInfo(info: Array[Int]): Unit = {
     _preparedParamsTypesInfo = Option(info)
   }
 
@@ -239,7 +240,13 @@ class SnappyParser(session: SnappySession)
     questionMark ~> (() => {
       _questionMarkCounter += 1
       if (_isPreparePhase) {
-        ParamLiteral(Row(_questionMarkCounter), NullType, 0, execId = -1, tokenized = true)
+        // MutableInt as value of ParamLiteral stores the position of ?
+        val counter = new MutableInt
+        counter.value = _questionMarkCounter
+        counter.isNull = false
+        // foldable condition same as that in newTokenizedLiteral
+        ParamLiteral(counter, NullType, 0, execId = -1, tokenized = true).markFoldable(
+          !canTokenize || !tokenize)
       } else {
         assert(_parameterValueSet.isDefined,
           "For Prepared Statement, Parameter constants are not provided")
@@ -502,7 +509,7 @@ class SnappyParser(session: SnappySession)
       Expression :: HNil] = rule {
     LIKE ~ termExpression ~>
         ((e1: Expression, e2: Expression) => e2 match {
-          case l: TokenizedLiteral if !l.value.isInstanceOf[Row] => likeExpression(e1, l)
+          case l: TokenizedLiteral if !l.value.isInstanceOf[MutableInt] => likeExpression(e1, l)
           case _ => Like(e1, e2)
         }) |
     IN ~ '(' ~ ws ~ (
@@ -516,7 +523,7 @@ class SnappyParser(session: SnappySession)
           And(GreaterThanOrEqual(e, el), LessThanOrEqual(e, eu))) |
     (RLIKE | REGEXP) ~ termExpression ~>
         ((e1: Expression, e2: Expression) => e2 match {
-          case l: TokenizedLiteral if !l.value.isInstanceOf[Row] =>
+          case l: TokenizedLiteral if !l.value.isInstanceOf[MutableInt] =>
             removeIfParamLiteralFromContext(l)
             RLike(e1, newLiteral(l.value, l.dataType))
           case _ => RLike(e1, e2)
@@ -1259,30 +1266,6 @@ class SnappyParser(session: SnappySession)
     capture(INSERT ~ INTO) ~ tableIdentifier ~
         capture(ANY.*) ~> ((c: String, r: TableIdentifier, s: String) => DMLExternalTable(
       internals.newUnresolvedRelation(r, None), s"$c ${quotedUppercaseId(r)} $s"))
-  }
-
-  protected def putValuesOperation: Rule1[LogicalPlan] = rule {
-    capture(PUT ~ INTO) ~ tableIdentifier ~
-        capture(('(' ~ ws ~ (identifier * commaSep) ~ ')' ~ ws ).? ~
-        VALUES ~ ('(' ~ ws ~ (expression * commaSep) ~ ')').* ~ ws) ~>
-        ((c: String, r: TableIdentifier, identifiers: Any, valueExpr: Any, s: String)
-        => {
-          val colNames = identifiers.asInstanceOf[Option[Seq[String]]]
-          val valueExpr1 = valueExpr.asInstanceOf[Seq[Seq[Expression]]]
-          val catalog = session.sessionState.catalog
-          val table = catalog.getTableMetadata(r)
-          val tableName = table.identifier.identifier
-          val db = table.database
-          val tableType = CatalogObjectType.getTableType(session.externalCatalog.getTable(
-            db, tableName)).toString
-          if (tableType == CatalogObjectType.Column.toString) {
-            PutIntoValuesColumnTable(db, tableName, colNames, valueExpr1.head)
-          }
-          else {
-            DMLExternalTable(internals.newUnresolvedRelation(r, None),
-              s"$c ${quotedUppercaseId(r)} $s")
-          }
-        })
   }
 
   // It can be the following patterns:

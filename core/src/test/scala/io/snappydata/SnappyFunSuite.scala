@@ -17,7 +17,7 @@
 package io.snappydata
 
 import java.io.File
-import java.sql.Statement
+import java.sql.{PreparedStatement, Statement}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -221,7 +221,7 @@ object SnappyFunSuite extends Assertions with SparkSupport {
    */
   def resultSetToDataset(session: SnappySession, stmt: Statement)
       (sql: String): Dataset[Row] = {
-    if (stmt.execute(sql)) {
+    if (if (sql.isEmpty) stmt.asInstanceOf[PreparedStatement].execute() else stmt.execute(sql)) {
       val rs = stmt.getResultSet
       val schema = StructType(JdbcUtils.getSchema(rs, SnappyStoreDialect).map(f => StructField(
         f.name.toLowerCase, f.dataType, f.nullable, withName(f.name.toLowerCase, f.metadata))))

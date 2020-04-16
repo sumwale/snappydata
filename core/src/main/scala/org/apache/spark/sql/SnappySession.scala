@@ -209,15 +209,13 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   }
 
   final def prepareSQL(sqlText: String, skipPromote: Boolean = false): LogicalPlan = {
-    val logical = snappySessionState.snappySqlParser.parsePlan(sqlText, clearExecutionData = true)
-    snappySessionState.executePlan(logical).analyzed
-    /*
-    SparkSession.setActiveSession(this)
-    val ap: Analyzer = sessionState.analyzer
-    // logInfo(s"KN: Batches ${ap.batches.filter(
-    //  _.name.equalsIgnoreCase("Resolution")).mkString("_")}")
-    ap.execute(logical)
-    */
+    setPreparedQuery(preparePhase = true, None)
+    try {
+      val logical = snappySessionState.snappySqlParser.parsePlan(sqlText, clearExecutionData = true)
+      snappySessionState.executePlan(logical).analyzed
+    } finally {
+      setPreparedQuery(preparePhase = false, None)
+    }
   }
 
   private[sql] final def executePlan(plan: LogicalPlan, retryCnt: Int = 0): QueryExecution = {
@@ -2018,14 +2016,16 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       startTime: Long, endTime: Long, k: Int): DataFrame =
     contextFunctions.queryTopK(topK, startTime, endTime, k)
 
+  def isPreparePhase: Boolean = snappyParser.isPreparePhase
+
   def setPreparedQuery(preparePhase: Boolean, paramSet: Option[ParameterValueSet]): Unit =
     snappyParser.setPreparedQuery(preparePhase, paramSet)
 
   def setPreparedParamsTypeInfo(info: Array[Int]): Unit =
     snappyParser.setPrepareParamsTypesInfo(info)
 
-  private[sql] def getParameterValue(
-      questionMarkCounter: Int, pvs: Any, preparedParamsTypesInfo: Option[Array[Int]]) = {
+  private[sql] def getParameterValue(questionMarkCounter: Int,
+      pvs: Any, preparedParamsTypesInfo: Option[Array[Int]]): (Any, DataType) = {
     val parameterValueSet = pvs.asInstanceOf[ParameterValueSet]
     if (questionMarkCounter > parameterValueSet.getParameterCount) {
       assert(assertion = false, s"For Prepared Statement, Got more number of" +

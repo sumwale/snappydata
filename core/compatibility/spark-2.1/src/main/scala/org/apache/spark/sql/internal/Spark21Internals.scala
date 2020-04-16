@@ -942,7 +942,7 @@ class SnappySessionState21(override val snappySession: SnappySession)
       functionResourceLoader, functionRegistry, sqlParser, conf, newHadoopConf(), wrapped)
   }
 
-  override def analyzerBuilder(): Analyzer = new Analyzer(catalog, conf) with SnappyAnalyzer {
+  override def analyzerBuilder(): Analyzer = new SnappyAnalyzer(catalog, conf) {
 
     self =>
 
@@ -973,13 +973,6 @@ class SnappySessionState21(override val snappySession: SnappySession)
     }
 
     override val extendedCheckRules: Seq[LogicalPlan => Unit] = getExtendedCheckRules
-
-    override lazy val baseAnalyzerInstance: Analyzer = new Analyzer(catalog, conf) {
-      override val extendedResolutionRules: Seq[Rule[LogicalPlan]] = self.extendedResolutionRules
-      override val extendedCheckRules: Seq[LogicalPlan => Unit] = self.extendedCheckRules
-
-      override def execute(plan: LogicalPlan): LogicalPlan = self.execute(plan)
-    }
   }
 
   override def optimizerBuilder(): Optimizer = {

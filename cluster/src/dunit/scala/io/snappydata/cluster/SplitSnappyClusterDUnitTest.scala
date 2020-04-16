@@ -940,6 +940,7 @@ object SplitSnappyClusterDUnitTest
     //      Logger.getLogger("akka").setLevel(Level.DEBUG)
     //      val snc = SnappySession.getOrCreate(sc).sqlContext
     val snc = SnappyContext(sc)
+    snc.snappySession.externalCatalog.invalidateAll()
 
     val mode = SnappyContext.getClusterMode(snc.sparkContext)
     mode match {

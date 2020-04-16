@@ -33,10 +33,9 @@ import com.pivotal.gemfirexd.internal.snappy.{LeadNodeExecutionContext, SparkSQL
 
 import org.apache.spark.sql.SparkSupport
 import org.apache.spark.sql.catalyst.expressions
-import org.apache.spark.sql.catalyst.expressions.{BinaryComparison, CaseWhen, Cast, Exists, Expression, Like, ListQuery, ParamLiteral, ScalarSubquery, SubqueryExpression}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.expressions.{BinaryComparison, CaseWhen, Cast, Exists, Expression, GenericInternalRow, Like, ListQuery, MutableInt, NamedExpression, ParamLiteral, ScalarSubquery, SubqueryExpression}
+import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Project}
 import org.apache.spark.sql.collection.Utils
-import org.apache.spark.sql.execution.PutIntoValuesColumnTable
 import org.apache.spark.sql.hive.QuestionMark
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SnappyUtils
@@ -63,13 +62,7 @@ class SparkSQLPrepareImpl(val sql: String,
 
   Utils.setCurrentSchema(session, schema, createIfNotExists = true)
 
-  session.setPreparedQuery(preparePhase = true, None)
-
-  private[this] val analyzedPlan: LogicalPlan = {
-    val aplan = session.prepareSQL(sql)
-//    println(aplan)
-    aplan
-  }
+  private[this] val analyzedPlan: LogicalPlan = session.prepareSQL(sql)
 
   private[this] val thresholdListener = Misc.getMemStore.thresholdListener()
 
@@ -97,15 +90,6 @@ class SparkSQLPrepareImpl(val sql: String,
     val questionMarkCounter = session.snappyParser.questionMarkCounter
     if (questionMarkCounter > 0) {
       val paramLiterals = new mutable.HashSet[ParamLiteral]()
-      analyzedPlan match {
-        case PutIntoValuesColumnTable(_, _, _, _) => analyzedPlan.expressions.foreach {
-          exp => exp.map {
-            case QuestionMark(pos) =>
-              SparkSQLPrepareImpl.addParamLiteral(pos, exp.dataType, exp.nullable, paramLiterals)
-          }
-        }
-        case _ =>
-      }
       SparkSQLPrepareImpl.allParamLiterals(analyzedPlan, paramLiterals)
       if (paramLiterals.size != questionMarkCounter) {
         SparkSQLPrepareImpl.remainingParamLiterals(analyzedPlan, paramLiterals)
@@ -113,7 +97,9 @@ class SparkSQLPrepareImpl(val sql: String,
       val paramLiteralsAtPrepare = paramLiterals.toArray.sortBy(_.pos)
       val paramCount = paramLiteralsAtPrepare.length
       if (paramCount != questionMarkCounter) {
-        throw Util.generateCsSQLException(SQLState.NOT_FOR_PREPARED_STATEMENT, sql)
+        throw Util.generateCsSQLException(SQLState.NOT_FOR_PREPARED_STATEMENT,
+          s"$sql: params = ${paramLiteralsAtPrepare.mkString("; ")} :: analyzed tree: " +
+              analyzedPlan.treeString(verbose = true))
       }
       val types = new Array[Int](paramCount * 4 + 1)
       types(0) = paramCount
@@ -236,7 +222,32 @@ object SparkSQLPrepareImpl extends SparkSupport {
         }
         inlist
     }
+    // handle VALUES(...)
+    plan.foreach(handleLocalRelation(_, Nil, result))
     handleSubQuery(plan, mapExpression)
+  }
+
+  private def handleLocalRelation(plan: LogicalPlan, proj: Seq[NamedExpression],
+      result: mutable.HashSet[ParamLiteral]): Unit = plan match {
+    case p: Project =>
+      handleLocalRelation(p.child, if (proj.isEmpty) p.projectList else proj, result)
+    case l: LocalRelation =>
+      val out = if (proj.isEmpty) l.output else proj
+      l.data.foreach {
+        case i: GenericInternalRow =>
+          var index = 0
+          val numValues = i.values.length
+          while (index < numValues) {
+            i.values(index) match {
+              case i: MutableInt =>
+                addParamLiteral(i.value, out(index).dataType, out(index).nullable, result)
+              case _ =>
+            }
+            index += 1
+          }
+        case _ =>
+      }
+    case _ =>
   }
 
   def remainingParamLiterals(plan: LogicalPlan, result: mutable.HashSet[ParamLiteral]): Unit = {

@@ -23,7 +23,7 @@ import com.pivotal.gemfirexd.internal.engine.distributed.utils.GemFireXDUtils
 import io.snappydata.{SnappyFunSuite, SnappyTableStatsProviderService}
 import org.scalatest.{Assertions, BeforeAndAfterAll}
 
-import org.apache.spark.sql.{SnappyContext, SnappySession}
+import org.apache.spark.sql.{Row, SnappyContext, SnappySession}
 import org.apache.spark.{Logging, SparkConf}
 
 class PreparedQueryRoutingSingleNodeSuite extends SnappyFunSuite with BeforeAndAfterAll {
@@ -85,6 +85,52 @@ class PreparedQueryRoutingSingleNodeSuite extends SnappyFunSuite with BeforeAndA
     var prepStatement4: java.sql.PreparedStatement = null
     var prepStatement5: java.sql.PreparedStatement = null
     try {
+      // test for prepared put and insert
+      prepStatement = conn.prepareStatement("create table temp1 (id long, id2 long) " +
+          "using column options (key_columns 'id')")
+      prepStatement.execute()
+      prepStatement.close()
+
+      prepStatement = conn.prepareStatement("put into temp1 values (?, ?)")
+      prepStatement.setInt(1, 1)
+      prepStatement.setLong(2, 1)
+      assert(prepStatement.executeUpdate() === 1)
+      prepStatement.close()
+      checkAnswer(snc.sql("select * from temp1"), Row(1L, 1L) :: Nil)
+
+      prepStatement = conn.prepareStatement("insert into temp1 values (?, ?)")
+      prepStatement.setInt(1, 2)
+      prepStatement.setString(2, "2") // should get cast to long
+      assert(prepStatement.executeUpdate() === 1)
+      prepStatement.close()
+      checkAnswer(snc.sql("select * from temp1"), Row(1L, 1L) :: Row(2L, 2L) :: Nil)
+
+      prepStatement = conn.prepareStatement("insert into temp1 values (?, 3)")
+      prepStatement.setLong(1, 3)
+      assert(prepStatement.executeUpdate() === 1)
+      prepStatement.close()
+      checkAnswer(snc.sql("select * from temp1"),
+        Row(1L, 1L) :: Row(2L, 2L) :: Row(3L, 3L) :: Nil)
+
+      // partial ? in values should fail due to CAST conflict (? will be NullType)
+      try {
+        prepStatement = conn.prepareStatement("put into temp1 values (?, ?), (?, 4)")
+        fail("expected failure in prepare with partial ? in VALUES")
+      } catch {
+        case _: SQLException =>
+      }
+      prepStatement = conn.prepareStatement("put into temp1 values (?, ?), (?, ?)")
+      prepStatement.setString(1, "1")
+      prepStatement.setInt(2, 2)
+      prepStatement.setLong(3, 4)
+      prepStatement.setString(4, "4")
+      assert(prepStatement.executeUpdate() === 2)
+      prepStatement.close()
+      checkAnswer(snc.sql("select * from temp1"),
+        Row(1L, 2L) :: Row(2L, 2L) :: Row(3L, 3L) :: Row(4L, 4L) :: Nil)
+
+      snc.sql("drop table temp1")
+
       val qry = s"select ol_int_id, ol_int2_id, ol_str_id " +
           s" from $tableName " +
           s" where ol_int_id < ? " +

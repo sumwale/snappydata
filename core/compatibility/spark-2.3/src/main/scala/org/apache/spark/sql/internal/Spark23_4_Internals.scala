@@ -597,7 +597,7 @@ abstract class SnappySessionStateBuilder23_4(session: SnappySession,
 
   override protected lazy val catalog: SnappySessionCatalog = createCatalog(wrapped = None)
 
-  override protected def analyzer: Analyzer = new Analyzer(catalog, conf) with SnappyAnalyzer {
+  override protected def analyzer: Analyzer = new SnappyAnalyzer(catalog, conf) {
 
     aSelf =>
 
@@ -632,14 +632,6 @@ abstract class SnappySessionStateBuilder23_4(session: SnappySession,
 
     override val extendedCheckRules: Seq[LogicalPlan => Unit] =
       state.getExtendedCheckRules ++ (PreReadCheck +: customCheckRules)
-
-    override lazy val baseAnalyzerInstance: Analyzer = new Analyzer(catalog, conf) {
-      override val extendedResolutionRules: Seq[Rule[LogicalPlan]] = aSelf.extendedResolutionRules
-      override val postHocResolutionRules: Seq[Rule[LogicalPlan]] = aSelf.postHocResolutionRules
-      override val extendedCheckRules: Seq[LogicalPlan => Unit] = aSelf.extendedCheckRules
-
-      override def execute(plan: LogicalPlan): LogicalPlan = aSelf.execute(plan)
-    }
   }
 
   override protected def streamingQueryManager: StreamingQueryManager = {
