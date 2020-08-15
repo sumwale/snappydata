@@ -19,7 +19,7 @@ apply plugin: 'scala'
 
 compileScala.options.encoding = 'UTF-8'
 
-// directly include the base classes to ensure everything is compiled with Spark 2.4.5
+// directly include the base classes to ensure everything is compiled with Spark 2.4.6
 sourceSets.main.scala.srcDir '../spark-2.3/src/main/scala'
 sourceSets.main.scala.srcDir '../spark-2.3/src/main/java'
 sourceSets.main.scala.srcDir '../spark-2.4/src/main/scala'
@@ -28,7 +28,7 @@ sourceSets.main.java.srcDirs = []
 
 // this is current embedded version so will remain the same whether used
 // for embedded build or connector build
-String spark245Version = '2.4.5'
+String spark246Version = '2.4.6'
 
 dependencies {
   compileOnly 'org.scala-lang:scala-library:' + scalaVersion
@@ -46,11 +46,11 @@ dependencies {
     compile project(':snappy-spark:snappy-spark-hive_' + scalaBinaryVersion)
     compile project(':snappy-spark:snappy-spark-streaming_' + scalaBinaryVersion)
   } else {
-    compileOnly("org.apache.spark:spark-core_${scalaBinaryVersion}:${spark245Version}")
-    compileOnly("org.apache.spark:spark-catalyst_${scalaBinaryVersion}:${spark245Version}")
-    compileOnly("org.apache.spark:spark-sql_${scalaBinaryVersion}:${spark245Version}")
-    compileOnly("org.apache.spark:spark-hive_${scalaBinaryVersion}:${spark245Version}")
-    compileOnly("org.apache.spark:spark-streaming_${scalaBinaryVersion}:${spark245Version}")
+    compileOnly("org.apache.spark:spark-core_${scalaBinaryVersion}:${spark246Version}")
+    compileOnly("org.apache.spark:spark-catalyst_${scalaBinaryVersion}:${spark246Version}")
+    compileOnly("org.apache.spark:spark-sql_${scalaBinaryVersion}:${spark246Version}")
+    compileOnly("org.apache.spark:spark-hive_${scalaBinaryVersion}:${spark246Version}")
+    compileOnly("org.apache.spark:spark-streaming_${scalaBinaryVersion}:${spark246Version}")
   }
 
   compileOnly "org.eclipse.jetty:jetty-servlet:${jettyVersion}"
@@ -64,5 +64,5 @@ dependencies {
   compileOnly project(':snappy-store:snappydata-store-core')
 }
 
-archivesBaseName = "snappydata-core-compat-spark${spark245Version}_${scalaBinaryVersion}"
-sparkPackageName = "snappydata-${version}_${spark245Version}-s_${scalaBinaryVersion}"
+archivesBaseName = "snappydata-core-compat-spark${spark246Version}_${scalaBinaryVersion}"
+sparkPackageName = "snappydata-${version}_${spark246Version}-s_${scalaBinaryVersion}"

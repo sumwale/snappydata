@@ -31,7 +31,7 @@ import org.apache.spark.internal.config.ConfigBuilder
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FunctionBuilder
-import org.apache.spark.sql.catalyst.analysis.{Analyzer, UnresolvedRelation, UnresolvedSubqueryColumnAliases, UnresolvedTableValuedFunction}
+import org.apache.spark.sql.catalyst.analysis.{Analyzer, UnresolvedRegex, UnresolvedRelation, UnresolvedSubqueryColumnAliases, UnresolvedTableValuedFunction}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction}
@@ -128,6 +128,15 @@ abstract class Spark23_4_Internals extends SparkInternals {
       newExprId: ExprId): Expression = {
     throw new UnsupportedOperationException(
       s"unexpected copyPredicateSubquery call in Spark $version module")
+  }
+
+  override def newUnresolvedRegex(regex: String, table: Option[String],
+      caseSensitive: Boolean): Expression = {
+    UnresolvedRegex(regex, table, caseSensitive)
+  }
+
+  override def newLambdaFunction(expression: Expression, args: Seq[Expression]): Expression = {
+    throw new ParseException(s"Lambda functions not supported in Spark $version")
   }
 
   // scalastyle:off

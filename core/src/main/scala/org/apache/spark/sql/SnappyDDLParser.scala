@@ -110,6 +110,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def ANALYZE: Rule0 = rule { keyword(Consts.ANALYZE) }
   final def ANTI: Rule0 = rule { keyword(Consts.ANTI) }
   final def AUTHORIZATION: Rule0 = rule { keyword(Consts.AUTHORIZATION) }
+  final def BOTH: Rule0 = rule { keyword(Consts.BOTH) }
   final def BUCKETS: Rule0 = rule { keyword(Consts.BUCKETS) }
   final def CACHE: Rule0 = rule { keyword(Consts.CACHE) }
   final def CALL: Rule0 = rule{ keyword(Consts.CALL) }
@@ -155,6 +156,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def GLOBAL: Rule0 = rule { keyword(Consts.GLOBAL) }
   final def HASH: Rule0 = rule { keyword(Consts.HASH) }
   final def IF: Rule0 = rule { keyword(Consts.IF) }
+  final def IGNORE: Rule0 = rule { keyword(Consts.IGNORE) }
   final def INDEX: Rule0 = rule { keyword(Consts.INDEX) }
   final def INIT: Rule0 = rule { keyword(Consts.INIT) }
   final def INTERVAL: Rule0 = rule { keyword(Consts.INTERVAL) }
@@ -163,6 +165,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def LAST: Rule0 = rule { keyword(Consts.LAST) }
   final def LAZY: Rule0 = rule { keyword(Consts.LAZY) }
   final def LDAPGROUP: Rule0 = rule { keyword(Consts.LDAPGROUP) }
+  final def LEADING: Rule0 = rule { keyword(Consts.LEADING) }
   final def LEVEL: Rule0 = rule { keyword(Consts.LEVEL) }
   final def LIMIT: Rule0 = rule { keyword(Consts.LIMIT) }
   final def LIST: Rule0 = rule { keyword(Consts.LIST) }
@@ -176,7 +179,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def NULLS: Rule0 = rule { keyword(Consts.NULLS) }
   final def OF: Rule0 = rule { keyword(Consts.OF) }
   final def ONLY: Rule0 = rule { keyword(Consts.ONLY) }
-  final def OPTIONS: Rule0 = rule { keyword(Consts.OPTIONS) | keyword(Consts.TBLPROPERTIES) }
+  final def OPTIONS: Rule0 = rule { keyword(Consts.OPTIONS) }
   final def OUT: Rule0 = rule { keyword(Consts.OUT) }
   final def OVERWRITE: Rule0 = rule { keyword(Consts.OVERWRITE) }
   final def PACKAGE: Rule0 = rule { keyword(Consts.PACKAGE) }
@@ -186,6 +189,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def PATH: Rule0 = rule { keyword(Consts.PATH) }
   final def PERCENT: Rule0 = rule { keyword(Consts.PERCENT) }
   final def POLICY: Rule0 = rule { keyword(Consts.POLICY) }
+  final def POSITION: Rule0 = rule { keyword(Consts.POSITION) }
   final def PRIMARY: Rule0 = rule { keyword(Consts.PRIMARY) }
   final def PURGE: Rule0 = rule { keyword(Consts.PURGE) }
   final def PUT: Rule0 = rule { keyword(Consts.PUT) }
@@ -217,7 +221,9 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def TABLESAMPLE: Rule0 = rule { keyword(Consts.TABLESAMPLE) }
   final def TBLPROPERTIES: Rule0 = rule { keyword(Consts.TBLPROPERTIES) }
   final def TEMPORARY: Rule0 = rule { keyword(Consts.TEMPORARY) | keyword(Consts.TEMP) }
+  final def TRAILING: Rule0 = rule { keyword(Consts.TRAILING) }
   final def TRIGGER: Rule0 = rule { keyword(Consts.TRIGGER) }
+  final def TRIM: Rule0 = rule { keyword(Consts.TRIM) }
   final def TRUNCATE: Rule0 = rule { keyword(Consts.TRUNCATE) }
   final def UNCACHE: Rule0 = rule { keyword(Consts.UNCACHE) }
   final def UNDEPLOY: Rule0 = rule { keyword(Consts.UNDEPLOY) }
@@ -271,8 +277,8 @@ abstract class SnappyDDLParser(session: SnappySession)
   // DDLs, SET etc
 
   final type ColumnDirectionMap = Seq[(String, Option[SortDirection])]
-  final type TableEnd = (Option[String], Option[Map[String, String]],
-      Option[String], Array[String], Option[BucketSpec], Option[String], Option[LogicalPlan])
+  final type TableEnd = (Option[String], Option[Map[String, String]], Option[Map[String, String]],
+      Option[String], Option[Seq[String]], Option[BucketSpec], Option[String], Option[LogicalPlan])
 
   protected final def ifNotExists: Rule1[Boolean] = rule {
     (IF ~ NOT ~ EXISTS ~ push(true)).? ~> ((o: Any) => o != None)
@@ -287,12 +293,16 @@ abstract class SnappyDDLParser(session: SnappySession)
         ((id: String, cm: Any) => id -> cm.asInstanceOf[Option[String]])
   }
 
+  protected final def locationSpec: Rule1[String] = rule {
+    LOCATION ~ stringLiteral
+  }
+
   protected def createHiveTable: Rule1[LogicalPlan] = rule {
-    test(session.enableHiveSupport) ~ capture(CREATE ~ TABLE ~ ifNotExists ~
-        tableIdentifier ~ tableSchema.? ~ (COMMENT ~ stringLiteral).?) ~
-        capture(USING ~ ignoreCase("hive") ~ ws | PARTITIONED ~ BY | CLUSTERED ~ BY |
+    test(session.enableHiveSupport) ~ capture(CREATE ~ (TEMPORARY | EXTERNAL).? ~
+        TABLE ~ ifNotExists ~ tableIdentifier ~ tableSchema.?) ~
+        capture(USING ~ ignoreCase("hive") ~ ws | COMMENT | PARTITIONED ~ BY | CLUSTERED ~ BY |
             SKEWED ~ BY | ROW ~ FORMAT | STORED | LOCATION | TBLPROPERTIES) ~ capture(ANY.*) ~>
-        ((_: Boolean, _: TableIdentifier, _: Any, _: Any, head: String, k: String, tail: String) =>
+        ((_: Boolean, _: TableIdentifier, _: Any, head: String, k: String, tail: String) =>
           if (Utils.toLowerCase(k).startsWith("using")) sparkParser.parsePlan(head + tail)
           else sparkParser.parsePlan(head + k + tail))
   }
@@ -305,6 +315,14 @@ abstract class SnappyDDLParser(session: SnappySession)
       val options = remaining._2 match {
         case None => Map.empty[String, String]
         case Some(m) => m
+      }
+      val props = remaining._3 match {
+        case None => Map.empty[String, String]
+        case Some(m) => m
+      }
+      val partitionCols = remaining._5 match {
+        case None => Nil
+        case Some(s) => s
       }
       val provider = remaining._1 match {
         case None =>
@@ -340,15 +358,15 @@ abstract class SnappyDDLParser(session: SnappySession)
         // the save mode will be ignore.
         val mode = if (allowExisting) SaveMode.Ignore else SaveMode.ErrorIfExists
         CreateTableUsingCommand(tableIdent, None, userSpecifiedSchema, schemaDDL,
-          provider, mode, options, remaining._4, remaining._5, remaining._7, external != None,
-          comment = remaining._3, location = remaining._6)
+          provider, mode, options, props, partitionCols, remaining._6, remaining._8,
+          external != None, comment = remaining._4, location = remaining._7)
       }
     }
   }
 
   protected def createTableLike: Rule1[LogicalPlan] = rule {
     CREATE ~ TABLE ~ ifNotExists ~ tableIdentifier ~ LIKE ~ tableIdentifier ~
-        (LOCATION ~ stringLiteral).? ~> ((allowExisting: Boolean, targetIdent: TableIdentifier,
+        locationSpec.? ~> ((allowExisting: Boolean, targetIdent: TableIdentifier,
         sourceIdent: TableIdentifier, location: Any) => internals.newCreateTableLikeCommand(
       targetIdent, sourceIdent, location.asInstanceOf[Option[String]], allowExisting))
   }
@@ -424,7 +442,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   }
 
   protected final def identifierList: Rule1[Seq[String]] = rule {
-    '(' ~ ws ~ (identifier + commaSep) ~ ')' ~ ws
+    O_PAREN ~ (identifier + commaSep) ~ C_PAREN
   }
 
   protected final def bucketSpec: Rule1[BucketSpec] = rule {
@@ -442,24 +460,36 @@ abstract class SnappyDDLParser(session: SnappySession)
       })
   }
 
+  private def checkDuplicate(opts: Array[Option[Any]], index: Int, v: Some[Any],
+      clause: String): Unit = {
+    if (opts(index).isDefined) {
+      throw new ParseException(s"Found duplicate clauses: $clause")
+    }
+    opts(index) = v
+  }
+
   protected final def ddlEnd: Rule1[TableEnd] = rule {
     ws ~ (USING ~ qualifiedName).? ~ (OPTIONS ~ options |
+        TBLPROPERTIES ~ options ~> ((m: Map[String, String]) => Some(m)) |
         COMMENT ~ stringLiteral ~> ((s: String) => Some(s)) |
-        PARTITIONED ~ BY ~ identifierList | bucketSpec | LOCATION ~ stringLiteral).* ~
+        PARTITIONED ~ BY ~ identifierList | bucketSpec | locationSpec).* ~
         (AS ~ query).? ~ ws ~ &((';' ~ ws).* ~ EOI) ~>
         ((provider: Any, optionals: Any, asQuery: Any) => {
           // options, comment, partitions, buckets, location
-          val tableOpts = Array[Any](None, None, Utils.EMPTY_STRING_ARRAY, None, None)
+          val tableOpts = Array[Option[Any]](None, None, None, None, None, None)
           optionals.asInstanceOf[Seq[Any]].foreach {
-            case opts: Map[_, _] => tableOpts(0) = Some(opts)
-            case comment: Some[_] => tableOpts(1) = comment
-            case parts: Seq[_] => tableOpts(2) = parts.asInstanceOf[Seq[String]].toArray
-            case buckets: BucketSpec => tableOpts(3) = Some(buckets)
-            case location: String => tableOpts(4) = Some(location)
-            case v => throw new ParseException(s"Unknown table option: $v")
+            case opts: Map[_, _] => checkDuplicate(tableOpts, 0, Some(opts), "OPTIONS")
+            case props: Some[_] if props.get.isInstanceOf[Map[_, _]] =>
+              checkDuplicate(tableOpts, 1, props, "TBLPROPERTIES")
+            case comment: Some[_] => checkDuplicate(tableOpts, 2, comment, "COMMENT")
+            case parts: Seq[_] => checkDuplicate(tableOpts, 3,
+              Some(parts.asInstanceOf[Seq[String]]), "PARTITIONED BY")
+            case buckets: BucketSpec => checkDuplicate(tableOpts, 4, Some(buckets), "CLUSTERED BY")
+            case location: String => checkDuplicate(tableOpts, 5, Some(location), "LOCATION")
+            case v => throw new ParseException(s"Unknown table clause: $v")
           }
           (provider, tableOpts(0), tableOpts(1), tableOpts(2), tableOpts(3), tableOpts(4),
-              asQuery).asInstanceOf[TableEnd]
+              tableOpts(5), asQuery).asInstanceOf[TableEnd]
         })
   }
 
@@ -470,8 +500,8 @@ abstract class SnappyDDLParser(session: SnappySession)
     // no free form pass through to store/spark-hive layer if USING has been provided
     // to detect genuine syntax errors correctly rather than store throwing
     // some irrelevant error
-    (!(ws ~ (USING ~ qualifiedName | OPTIONS ~ options)) ~ capture(ANY ~ beforeDDLEnd.*) ~>
-        ((s: StringBuilder, n: String) => s.append(n))) ~ tableEnd1
+    (!(ws ~ (USING ~ qualifiedName | (OPTIONS | TBLPROPERTIES) ~ options)) ~ capture(ANY ~
+        beforeDDLEnd.*) ~> ((s: StringBuilder, n: String) => s.append(n))) ~ tableEnd1
   }
 
   protected final def tableEnd: Rule2[StringBuilder, TableEnd] = rule {
@@ -505,8 +535,8 @@ abstract class SnappyDDLParser(session: SnappySession)
   protected def createView: Rule1[LogicalPlan] = rule {
     CREATE ~ (OR ~ REPLACE ~ push(true)).? ~ (globalOrTemporary.? ~ VIEW |
         globalOrTemporary ~ TABLE) ~ ifNotExists ~ tableIdentifier ~
-        ('(' ~ ws ~ (identifierWithComment + commaSep) ~ ')' ~ ws).? ~
-        (COMMENT ~ stringLiteral).? ~ (OPTIONS ~ options).? ~
+        (O_PAREN ~ (identifierWithComment + commaSep) ~ C_PAREN).? ~
+        (COMMENT ~ stringLiteral).? ~ ((OPTIONS | TBLPROPERTIES) ~ options).? ~
         AS ~ capture(query) ~> { (replace: Any, gt: Any,
         allowExisting: Boolean, table: TableIdentifier, cols: Any, comment: Any,
         opts: Any, plan: LogicalPlan, queryStr: String) =>
@@ -616,27 +646,24 @@ abstract class SnappyDDLParser(session: SnappySession)
     id
   }
 
-  private def toPartSpec(partSpec: Any): Option[Map[String, String]] = {
-    partSpec.asInstanceOf[Option[Map[String, Option[String]]]] match {
-      case None => None
-      case Some(spec) => Some(spec.mapValues {
-        case None => null
-        case Some(v) => v
-      })
-    }
+  private def toPartSpec(spec: Map[String, Option[String]]): Option[Map[String, String]] = {
+    if (spec.isEmpty) None
+    else Some(spec.mapValues {
+      case None => null
+      case Some(v) => v
+    })
   }
 
   private final def alterTableProps: Rule1[LogicalPlan] = rule {
-    ALTER ~ TABLE ~ tableIdentifier ~ partitionSpec.? ~ SET ~ (
-        SERDEPROPERTIES ~ options ~> ((id: TableIdentifier, partSpec: Any,
+    ALTER ~ TABLE ~ tableIdentifier ~ partitionSpec ~ SET ~ (
+        SERDEPROPERTIES ~ options ~> ((id: TableIdentifier, partSpec: Map[String, Option[String]],
             opts: Map[String, String]) => AlterTableSerDePropertiesCommand(canAlter(
           id, "SET SERDEPROPERTIES"), None, Some(opts), toPartSpec(partSpec))) |
         SERDE ~ stringLiteral ~ (WITH ~ SERDEPROPERTIES ~ options).? ~>
-            ((id: TableIdentifier, partSpec: Any, name: String, opts: Any) =>
+            ((id: TableIdentifier, partSpec: Map[String, Option[String]], n: String, opts: Any) =>
               AlterTableSerDePropertiesCommand(canAlter(id, "SET SERDE", allBuiltins = true),
-                Some(name), opts.asInstanceOf[Option[Map[String, String]]],
-                toPartSpec(partSpec))) |
-        LOCATION ~ stringLiteral ~> ((id: TableIdentifier, partSpec: Any,
+                Some(n), opts.asInstanceOf[Option[Map[String, String]]], toPartSpec(partSpec))) |
+        locationSpec ~> ((id: TableIdentifier, partSpec: Map[String, Option[String]],
             path: String) => AlterTableSetLocationCommand(canAlter(
           id, "SET LOCATION", allBuiltins = true), toPartSpec(partSpec), path))
     )
@@ -650,7 +677,7 @@ abstract class SnappyDDLParser(session: SnappySession)
             opts: Map[String, String]) => AlterTableSetPropertiesCommand(canAlter(
           id, "SET TBLPROPERTIES"), opts, view)) |
         UNSET ~ TBLPROPERTIES ~ (IF ~ EXISTS ~ push(true)).? ~
-            '(' ~ ws ~ (optionKey + commaSep) ~ ')' ~ ws ~> ((view: Boolean,
+            O_PAREN ~ (optionKey + commaSep) ~ C_PAREN ~> ((view: Boolean,
             id: TableIdentifier, exists: Any, keys: Seq[String]) =>
           AlterTableUnsetPropertiesCommand(canAlter(id, "UNSET TBLPROPERTIES"), keys,
             exists.asInstanceOf[Option[Boolean]].isDefined, view))
@@ -673,7 +700,7 @@ abstract class SnappyDDLParser(session: SnappySession)
         // other store ALTER statements which don't effect the snappydata catalog
         capture((ALTER | SET) ~ ANY. +) ~> ((table: TableIdentifier, s: String) =>
           AlterTableMiscCommand(table, s"ALTER TABLE ${quotedUppercaseId(table)} $s")) |
-        partitionSpec.? ~ CHANGE ~ ANY. + ~> ((_: TableIdentifier, _: Any) =>
+        partitionSpec ~ CHANGE ~ ANY. + ~> ((_: TableIdentifier, _: Map[String, Option[String]]) =>
           sparkParser.parsePlan(input.sliceString(0, input.length)))
     )
   }
@@ -695,7 +722,7 @@ abstract class SnappyDDLParser(session: SnappySession)
         // for both builtin as well as external implementations
         val mode = if (allowExisting) SaveMode.Ignore else SaveMode.ErrorIfExists
         CreateTableUsingCommand(streamIdent, None, specifiedSchema, None,
-          provider, mode, opts, partitionColumns = Utils.EMPTY_STRING_ARRAY,
+          provider, mode, opts, properties = Map.empty, partitionColumns = Nil,
           bucketSpec = None, query = None, isExternal = false)
     }
   }
@@ -842,8 +869,9 @@ abstract class SnappyDDLParser(session: SnappySession)
         (SCHEMA | DATABASE) ~ (EXTENDED ~ push(true)).? ~ identifier ~>
             ((extended: Any, name: String) =>
               DescribeDatabaseCommand(name, extended.asInstanceOf[Option[Boolean]].isDefined)) |
-        (EXTENDED ~ push(true) | FORMATTED ~ push(false)).? ~ tableIdentifier ~>
-            ((extendedOrFormatted: Any, tableIdent: TableIdentifier) => {
+        (EXTENDED ~ push(true) | FORMATTED ~ push(false)).? ~ tableIdentifier ~ partitionSpec ~>
+            ((extendedOrFormatted: Any, tableIdent: TableIdentifier,
+                spec: Map[String, Option[String]]) => {
               // ensure columns are sent back as CLOB for large results with EXTENDED
               queryHints.put(QueryHint.ColumnsAsClob.toString, "data_type,comment")
               val (isExtended, isFormatted) = extendedOrFormatted match {
@@ -851,8 +879,8 @@ abstract class SnappyDDLParser(session: SnappySession)
                 case Some(true) => (true, false)
                 case Some(false) => (false, true)
               }
-              DescribeSnappyTableCommand(tableIdent, Map.empty[String, String],
-                isExtended, isFormatted)
+              DescribeSnappyTableCommand(tableIdent,
+                spec.mapValues(o => if (o.isEmpty) null else o.get), isExtended, isFormatted)
             })
     )
   }
@@ -908,8 +936,8 @@ abstract class SnappyDDLParser(session: SnappySession)
   }
 
   protected final def colsWithDirection: Rule1[ColumnDirectionMap] = rule {
-    '(' ~ ws ~ (identifier ~ sortDirection.? ~> ((id: Any, direction: Any) =>
-      (id, direction))).*(commaSep) ~ ')' ~ ws ~> ((cols: Any) =>
+    O_PAREN ~ (identifier ~ sortDirection.? ~> ((id: Any, direction: Any) =>
+      (id, direction))).*(commaSep) ~ C_PAREN ~> ((cols: Any) =>
       cols.asInstanceOf[Seq[(String, Option[SortDirection])]])
   }
 
@@ -969,7 +997,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   }
 
   protected final def tableSchema: Rule1[Seq[StructField]] = rule {
-    '(' ~ ws ~ (column + commaSep) ~ ')' ~ ws
+    O_PAREN ~ (column + commaSep) ~ C_PAREN
   }
 
   final def tableSchemaOpt: Rule1[Option[Seq[StructField]]] = rule {
@@ -981,11 +1009,12 @@ abstract class SnappyDDLParser(session: SnappySession)
   }
 
   protected final def option: Rule1[(String, String)] = rule {
-    optionKey ~ ('=' ~ '='.? ~ ws).? ~ stringLiteral ~ ws ~> ((k: String, v: String) => k -> v)
+    optionKey ~ ('=' ~ '='.? ~ ws).? ~ (stringLiteral | numericLiteral | booleanLiteral) ~ ws ~>
+        ((k: String, v: Any) => k -> v.toString)
   }
 
   protected final def options: Rule1[Map[String, String]] = rule {
-    '(' ~ ws ~ (option * commaSep) ~ ')' ~ ws ~>
+    O_PAREN ~ (option * commaSep) ~ C_PAREN ~>
         ((pairs: Any) => pairs.asInstanceOf[Seq[(String, String)]].toMap)
   }
 

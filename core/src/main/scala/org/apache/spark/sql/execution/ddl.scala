@@ -59,7 +59,8 @@ case class CreateTableUsingCommand(
     provider: String,
     mode: SaveMode,
     options: Map[String, String],
-    partitionColumns: Array[String],
+    properties: Map[String, String],
+    partitionColumns: Seq[String],
     bucketSpec: Option[BucketSpec],
     query: Option[LogicalPlan],
     isExternal: Boolean,
@@ -70,7 +71,7 @@ case class CreateTableUsingCommand(
     val session = sparkSession.asInstanceOf[SnappySession]
     val allOptions = session.addBaseTableOption(baseTable, options)
     session.createTableInternal(tableIdent, provider, userSpecifiedSchema, schemaDDL, mode,
-      allOptions, isExternal, partitionColumns, bucketSpec, query, comment, location)
+      allOptions, isExternal, properties, partitionColumns, bucketSpec, query, comment, location)
     Nil
   }
 }

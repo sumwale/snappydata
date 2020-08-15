@@ -1163,7 +1163,7 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
       case Some(c) => c
     }
     val splitIndex = className.lastIndexOf("__")
-    val actualClassName = className.substring(0, splitIndex)
+    val actualClassName = if (splitIndex != -1) className.substring(0, splitIndex) else className
     val typeName = if (splitIndex != -1) className.substring(splitIndex + 2) else ""
     val dataType = if (typeName.isEmpty) None else Some(parser.parseDataType(typeName))
     UDFFunction.makeFunctionBuilder(funcName, urlClassLoader.loadClass(actualClassName), dataType)

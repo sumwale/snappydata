@@ -314,9 +314,6 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   private[sql] var planCaching: Boolean = Property.PlanCaching.get(sessionState.conf)
 
   @transient
-  private[sql] var tokenize: Boolean = Property.Tokenize.get(sessionState.conf)
-
-  @transient
   private[sql] var partitionPruning: Boolean = Property.PartitionPruning.get(sessionState.conf)
 
   @transient
@@ -1350,7 +1347,8 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       mode: SaveMode,
       options: Map[String, String],
       isExternal: Boolean,
-      partitionColumns: Array[String] = Utils.EMPTY_STRING_ARRAY,
+      properties: Map[String, String] = Map.empty[String, String],
+      partitionColumns: Seq[String] = Nil,
       bucketSpec: Option[BucketSpec] = None,
       query: Option[LogicalPlan] = None,
       comment: Option[String] = None,
@@ -1365,7 +1363,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       }
       // for builtin tables, never use partitionSpec or bucketSpec since that has different
       // semantics and implies support for add/drop/recover partitions which is not possible
-      if (partitionColumns.length > 0) {
+      if (partitionColumns.nonEmpty) {
         throw new AnalysisException(s"CREATE TABLE ... USING '$provider' does not support " +
             "PARTITIONED BY clause.")
       }
@@ -1432,8 +1430,9 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       storage = storage,
       schema = schema,
       provider = Some(provider),
-      partitionColumnNames = partitionColumns.toSeq,
+      partitionColumnNames = partitionColumns,
       bucketSpec = bucketSpec,
+      properties = properties,
       comment = comment)
     val plan = CreateTable(tableDesc, mode, query.map(MarkerForCreateTableAsSelect))
     sessionState.executePlan(plan).toRdd

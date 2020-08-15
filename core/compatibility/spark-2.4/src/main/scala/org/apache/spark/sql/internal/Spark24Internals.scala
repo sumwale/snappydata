@@ -22,11 +22,11 @@ import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
-import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, TypeCoercion}
+import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, TypeCoercion, UnresolvedAttribute}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.codegen._
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, ExprId, Expression, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, ExprId, Expression, LambdaFunction, NamedExpression, UnresolvedNamedLambdaVariable}
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
 import org.apache.spark.sql.catalyst.plans.logical.{Except, Intersect, LogicalPlan, Pivot, SubqueryAlias}
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -57,6 +57,21 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
       exprId: ExprId): AttributeReference = {
     AttributeReference(name = name, dataType = dataType, nullable = nullable, metadata = metadata)(
       exprId, qualifier = attr.qualifier)
+  }
+
+  override def newLambdaFunction(expression: Expression, args: Seq[Expression]): Expression = {
+    val arguments = args.map {
+      case a: UnresolvedAttribute => UnresolvedNamedLambdaVariable(a.nameParts)
+      case ne: NamedExpression => ne.transformUp {
+        case a: UnresolvedAttribute => UnresolvedNamedLambdaVariable(a.nameParts)
+      }
+      case e =>
+        throw new ParseException(s"Lambda argument should be named expression: ${e.treeString}")
+    }.asInstanceOf[Seq[NamedExpression]]
+    val function = expression.transformUp {
+      case a: UnresolvedAttribute => UnresolvedNamedLambdaVariable(a.nameParts)
+    }
+    LambdaFunction(function, arguments)
   }
 
   override def newAttributeReference(name: String, dataType: DataType, nullable: Boolean,

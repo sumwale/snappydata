@@ -38,7 +38,9 @@ import org.apache.spark.sql.{SnappyParserConsts => Consts}
  */
 abstract class SnappyBaseParser(session: SparkSession) extends Parser {
 
-  protected var caseSensitive: Boolean = _
+  protected final var caseSensitive: Boolean = _
+
+  protected final var isQuoted: Boolean = _
 
   private[sql] final val queryHints: ConcurrentHashMap[String, String] =
     new ConcurrentHashMap[String, String](4, 0.7f, 1)
@@ -124,10 +126,6 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     ',' ~ ws
   }
 
-  protected final def questionMark: Rule0 = rule {
-    '?' ~ ws
-  }
-
   protected final def digits: Rule1[String] = rule {
     capture(CharPredicate.Digit. +) ~ ws
   }
@@ -175,14 +173,13 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     atomic(capture(Consts.alphaUnderscore ~ Consts.identifier.*)) ~ delimiter
   }
 
-  protected final def identifier: Rule1[String] = rule {
+  protected final def unreservedIdentifier: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     unquotedIdentifier ~> { (s: String) =>
       val lcase = lower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
-    } |
-    quotedIdentifier
+    }
   }
 
   // noinspection ScalaUnnecessaryParentheses
@@ -193,6 +190,22 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     atomic('"' ~ capture((noneOf("\"") | "\"\""). +) ~ '"') ~ ws ~> { (s: String) =>
       if (s.indexOf("\"\"") >= 0) s.replace("\"\"", "\"") else s
     }
+  }
+
+  protected final def identifier: Rule1[String] = rule {
+    unreservedIdentifier | quotedIdentifier
+  }
+
+  protected final def NOT_QUOTED: Rule0 = rule {
+    MATCH ~> (() => isQuoted = false)
+  }
+
+  protected final def IS_QUOTED: Rule0 = rule {
+    MATCH ~> (() => isQuoted = true)
+  }
+
+  protected final def identifierWithKind: Rule1[String] = rule {
+    unreservedIdentifier ~ NOT_QUOTED | quotedIdentifier ~ IS_QUOTED
   }
 
   /**
@@ -215,6 +228,14 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   protected final def quotedUppercaseId(id: IdentifierWithDatabase): String = id.database match {
     case None => s"`${upper(quoteIdentifier(id.identifier))}`"
     case Some(d) => s"`${upper(quoteIdentifier(d))}`.`${upper(quoteIdentifier(id.identifier))}`"
+  }
+
+  protected final def O_PAREN: Rule0 = rule {
+    ch('(') ~ ws
+  }
+
+  protected final def C_PAREN: Rule0 = rule {
+    ch(')') ~ ws
   }
 
   // DataTypes
@@ -250,7 +271,7 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   final def VARCHAR: Rule0 = newDataType(Consts.VARCHAR)
 
   protected final def fixedDecimalType: Rule1[DataType] = rule {
-    (DECIMAL | NUMERIC) ~ '(' ~ ws ~ digits ~ (commaSep ~ digits).? ~ ')' ~ ws ~>
+    (DECIMAL | NUMERIC) ~ O_PAREN ~ digits ~ (commaSep ~ digits).? ~ C_PAREN ~>
         ((precision: String, scale: Any) => DecimalType(precision.toInt,
           if (scale == None) 0 else scale.asInstanceOf[Option[String]].get.toInt))
   }
@@ -281,8 +302,8 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   }
 
   protected final def charType: Rule1[DataType] = rule {
-    VARCHAR ~ '(' ~ ws ~ digits ~ ')' ~ ws ~> ((_: String) => StringType) |
-    CHAR ~ '(' ~ ws ~ digits ~ ')' ~ ws ~> ((_: String) => StringType)
+    VARCHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((_: String) => StringType) |
+    CHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((_: String) => StringType)
   }
 
   final def dataType: Rule1[DataType] = rule {
@@ -309,8 +330,8 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   }
 
   protected final def columnCharType: Rule1[DataType] = rule {
-    VARCHAR ~ '(' ~ ws ~ digits ~ ')' ~ ws ~> ((d: String) => VarcharType(d.toInt)) |
-    CHAR ~ '(' ~ ws ~ digits ~ ')' ~ ws ~> ((d: String) => CharType(d.toInt)) |
+    VARCHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((d: String) => VarcharType(d.toInt)) |
+    CHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((d: String) => CharType(d.toInt)) |
     STRING ~> (() => StringType) |
     CLOB ~> (() => VarcharType(Int.MaxValue))
   }
@@ -437,6 +458,8 @@ object SnappyParserConsts {
     // and the Spark impls create the seed in constructor rather than in generated code
     "rand" -> Array.emptyIntArray, "randn" -> Array.emptyIntArray,
     "like" -> Array(1), "rlike" -> Array(1), "approx_count_distinct" -> Array(1)))
+
+  final val quotedRegexColumnNames = "spark.sql.parser.quotedRegexColumnNames"
 
   /**
    * Registering a Keyword with this method marks it a reserved keyword,
@@ -662,6 +685,7 @@ object SnappyParserConsts {
   // keywords that are neither reserved nor non-reserved and can be freely
   // used as named strictIdentifier
   final val ANALYZE: Keyword = new Keyword("analyze")
+  final val BOTH: Keyword = new Keyword("both")
   final val BUCKETS: Keyword = new Keyword("buckets")
   final val CACHE: Keyword = new Keyword("cache")
   final val CASCADE: Keyword = new Keyword("cascade")
@@ -684,11 +708,13 @@ object SnappyParserConsts {
   final val FORMATTED: Keyword = new Keyword("formatted")
   final val GLOBAL: Keyword = new Keyword("global")
   final val HASH: Keyword = new Keyword("hash")
+  final val IGNORE: Keyword = nonReservedKeyword("ignore")
   final val INIT: Keyword = new Keyword("init")
   final val JAR: Keyword = new Keyword("jar")
   final val JARS: Keyword = new Keyword("jars")
   final val LAZY: Keyword = new Keyword("lazy")
   final val LDAPGROUP: Keyword = new Keyword("ldapgroup")
+  final val LEADING: Keyword = new Keyword("leading")
   final val LEVEL: Keyword = new Keyword("level")
   final val LIST: Keyword = new Keyword("list")
   final val LOAD: Keyword = new Keyword("load")
@@ -705,6 +731,7 @@ object SnappyParserConsts {
   final val PARTITIONED: Keyword = new Keyword("partitioned")
   final val PERCENT: Keyword = new Keyword("percent")
   final val POLICY: Keyword = new Keyword("policy")
+  final val POSITION: Keyword = new Keyword("position")
   final val PRIMARY: Keyword = new Keyword("primary")
   final val PURGE: Keyword = new Keyword("purge")
   final val PUT: Keyword = new Keyword("put")
@@ -723,7 +750,9 @@ object SnappyParserConsts {
   final val TABLESAMPLE: Keyword = new Keyword("tablesample")
   final val TBLPROPERTIES: Keyword = new Keyword("tblproperties")
   final val TEMP: Keyword = new Keyword("temp")
+  final val TRAILING: Keyword = new Keyword("trailing")
   final val TRIGGER: Keyword = new Keyword("trigger")
+  final val TRIM: Keyword = new Keyword("trim")
   final val UNCACHE: Keyword = new Keyword("uncache")
   final val UNDEPLOY: Keyword = new Keyword("undeploy")
   final val UNIQUE: Keyword = new Keyword("unique")

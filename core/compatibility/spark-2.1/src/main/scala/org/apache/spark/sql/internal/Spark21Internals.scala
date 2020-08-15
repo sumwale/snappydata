@@ -129,6 +129,15 @@ class Spark21Internals(override val version: String) extends SparkInternals {
     expr.asInstanceOf[PredicateSubquery].copy(plan = newPlan, exprId = newExprId)
   }
 
+  override def newUnresolvedRegex(regexPattern: String, table: Option[String],
+      caseSensitive: Boolean): Expression = {
+    throw new ParseException(s"UnresolvedRegex not supported in Spark $version")
+  }
+
+  override def newLambdaFunction(expression: Expression, args: Seq[Expression]): Expression = {
+    throw new ParseException(s"Lambda functions not supported in Spark $version")
+  }
+
   // scalastyle:off
 
   override def columnTableScan(output: Seq[Attribute], dataRDD: RDD[Any],

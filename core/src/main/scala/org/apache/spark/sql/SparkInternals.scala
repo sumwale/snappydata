@@ -149,6 +149,16 @@ trait SparkInternals extends Logging {
    */
   def copyPredicateSubquery(expr: Expression, newPlan: LogicalPlan, newExprId: ExprId): Expression
 
+  /**
+   * Create a new unresolved regular expression.
+   */
+  def newUnresolvedRegex(regex: String, table: Option[String], caseSensitive: Boolean): Expression
+
+  /**
+   * Create a new lambda function with given arguments.
+   */
+  def newLambdaFunction(expression: Expression, args: Seq[Expression]): Expression
+
   // scalastyle:off
 
   /**
