@@ -17,7 +17,6 @@
 package org.apache.spark.sql
 
 import java.util.concurrent.ConcurrentHashMap
-import javax.xml.bind.DatatypeConverter
 
 import com.gemstone.gemfire.internal.shared.SystemProperties
 import io.snappydata.{HintName, QueryHint}
@@ -39,6 +38,12 @@ import org.apache.spark.sql.{SnappyParserConsts => Consts}
 abstract class SnappyBaseParser(session: SparkSession) extends Parser {
 
   protected final var caseSensitive: Boolean = _
+
+  protected final var escapedStringLiterals: Boolean = _
+
+  protected final var quotedRegexColumnNames: Boolean = _
+
+  protected final var legacySetOpsPrecedence: Boolean = _
 
   protected final var isQuoted: Boolean = _
 
@@ -139,15 +144,13 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   }
 
   protected final def stringLiteral: Rule1[String] = rule {
-    capture('\'' ~ (noneOf("'\\") | "''" | '\\' ~ ANY).* ~ '\'') ~ ws ~> ((s: String) =>
-      ParserUtils.unescapeSQLString(
-        if (s.indexOf("''") >= 0) "'" + s.substring(1, s.length - 1).replace("''", "\\'") + "'"
-        else s))
-  }
-
-  protected final def hexLiteral: Rule1[Array[Byte]] = rule {
-    (ch('X') | ch('x')) ~ ws ~ stringLiteral ~> ((s: String) =>
-      DatatypeConverter.parseHexBinary(if ((s.length & 0x1) == 1) "0" + s else s))
+    // noinspection ScalaUnnecessaryParentheses
+    capture('\'' ~ (noneOf("'\\") | "''" | '\\' ~ ANY).* ~ '\'') ~ ws ~> { (s: String) =>
+      val str = if (s.indexOf("''") >= 0) {
+        "'" + s.substring(1, s.length - 1).replace("''", "\\'") + "'"
+      } else s
+      if (escapedStringLiterals) str else ParserUtils.unescapeSQLString(str)
+    }
   }
 
   final def keyword(k: Keyword): Rule0 = rule {
@@ -196,16 +199,9 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     unreservedIdentifier | quotedIdentifier
   }
 
-  protected final def NOT_QUOTED: Rule0 = rule {
-    MATCH ~> (() => isQuoted = false)
-  }
-
-  protected final def IS_QUOTED: Rule0 = rule {
-    MATCH ~> (() => isQuoted = true)
-  }
-
-  protected final def identifierWithKind: Rule1[String] = rule {
-    unreservedIdentifier ~ NOT_QUOTED | quotedIdentifier ~ IS_QUOTED
+  protected final def identifierWithQuotedFlag: Rule1[String] = rule {
+    unreservedIdentifier ~> (() => isQuoted = false) |
+    quotedIdentifier ~> (() => isQuoted = true)
   }
 
   /**
@@ -412,7 +408,14 @@ object SnappyParserConsts {
   final val identifier: CharPredicate = CharPredicate.AlphaNum ++ underscore
   final val alphaUnderscore: CharPredicate = CharPredicate.Alpha ++ underscore
   final val plusOrMinus: CharPredicate = CharPredicate('+', '-')
-  final val arithmeticOperator = CharPredicate('*', '/', '%', '&', '|', '^')
+  final val unaryOperator: CharPredicate = CharPredicate('+', '-', '~')
+  /** arithmetic operators having the same precedence as multiplication */
+  final val multPrecOperator = CharPredicate('*', '/', '%')
+  /**
+   * arithmetic operators having the same precedence as addition
+   * except '|' which is handled separately
+   */
+  final val sumPrecOperator = CharPredicate('+', '-', '&', '^')
   final val exponent: CharPredicate = CharPredicate('e', 'E')
   final val numeric: CharPredicate = CharPredicate.Digit ++
       CharPredicate('.')
@@ -458,8 +461,6 @@ object SnappyParserConsts {
     // and the Spark impls create the seed in constructor rather than in generated code
     "rand" -> Array.emptyIntArray, "randn" -> Array.emptyIntArray,
     "like" -> Array(1), "rlike" -> Array(1), "approx_count_distinct" -> Array(1)))
-
-  final val quotedRegexColumnNames = "spark.sql.parser.quotedRegexColumnNames"
 
   /**
    * Registering a Keyword with this method marks it a reserved keyword,
@@ -703,6 +704,8 @@ object SnappyParserConsts {
   final val DEPLOY: Keyword = new Keyword("deploy")
   final val DIRECTORY: Keyword = new Keyword("directory")
   final val DISKSTORE: Keyword = new Keyword("diskstore")
+  final val DIV: Keyword = new Keyword("div")
+  final val EXTRACT: Keyword = nonReservedKeyword("extract")
   final val FOREIGN: Keyword = new Keyword("foreign")
   final val FORMAT: Keyword = new Keyword("format")
   final val FORMATTED: Keyword = new Keyword("formatted")

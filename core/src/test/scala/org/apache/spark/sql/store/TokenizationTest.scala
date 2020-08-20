@@ -381,7 +381,7 @@ class TokenizationTest
     snc.sql(s"drop table STAGING_AIRLINE")
   }
 
-  test("Test plan caching and tokenization disabled in session") {
+  test("Test plan caching disabled in session") {
     val numRows = 10
     createSimpleTableAndPoupulateData(numRows, s"$table")
 
@@ -447,20 +447,19 @@ class TokenizationTest
       cacheMap.clear()
 
       val newSession3 = new SnappySession(snc.sparkSession.sparkContext)
-      newSession3.sql(s"set snappydata.sql.tokenize=false")
       // check that SQLConf property names are case-insensitive
       newSession3.sql(s"set snappydata.sql.plancaching=true")
       assert(cacheMap.size() == 0)
 
       q.zipWithIndex.foreach { case (x, i) =>
-        var result = newSession3.sql(x).collect()
+        val result = newSession3.sql(x).collect()
         assert(result.length === 1)
         result.foreach(r => {
           assert(r.get(0) == r.get(1) && r.get(2) == i)
         })
       }
 
-      assert(cacheMap.size() == 10)
+      assert(cacheMap.size() == 1)
 
       newSession3.clear()
       cacheMap.clear()
@@ -468,7 +467,6 @@ class TokenizationTest
     } finally {
       snc.sql("set spark.sql.caseSensitive = false")
       snc.sql("set schema = APP")
-      snc.sql(s"set snappydata.sql.tokenize=true").collect()
     }
   }
 

@@ -53,7 +53,6 @@ class SQLFunctionsTestSuite extends SnappyFunSuite
     config(io.snappydata.Property.TestDisableCodeGenFlag.name, "true").
     config(io.snappydata.Property.UseOptimizedHashAggregateForSingleKey.name, "true").
     master("local[*]").getOrCreate()
-  // snc.sql("set snappydata.sql.tokenize=true")
   // snc.sql("set snappydata.sql.planCaching=true")
 
   val pw = new PrintWriter(new FileOutputStream(
@@ -2292,6 +2291,42 @@ class SQLFunctionsTestSuite extends SnappyFunSuite
 
     sparkQuery = "SELECT count(distinct(intcol)) from sparktable"
     snappyQuery = "SELECT count(distinct(intcol)) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(arrayintcol) from sparktable"
+    snappyQuery = "SELECT count(arrayintcol) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(distinct(arrayintcol)) from sparktable"
+    snappyQuery = "SELECT count(distinct(arrayintcol)) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(mapcol) from sparktable"
+    snappyQuery = "SELECT count(mapcol) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(distinct(mapcol)) from sparktable"
+    snappyQuery = "SELECT count(distinct(mapcol)) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(structcol) from sparktable"
+    snappyQuery = "SELECT count(structcol) from columnTable"
+    sparkDf = sparkSession.sql(s"$sparkQuery")
+    snappyDf = snc.sql(s"$snappyQuery")
+    validateResult(sparkDf, snappyDf)
+
+    sparkQuery = "SELECT count(distinct(structcol)) from sparktable"
+    snappyQuery = "SELECT count(distinct(structcol)) from columnTable"
     sparkDf = sparkSession.sql(s"$sparkQuery")
     snappyDf = snc.sql(s"$snappyQuery")
     validateResult(sparkDf, snappyDf)

@@ -88,8 +88,7 @@ case class SnappyHashAggregateExec(
       TypeUtilities.isFixedWidth(attr.dataType)) &&
         Property.UseOptimzedHashAggregate.get(conf) &&
         groupingExpressions.nonEmpty &&
-        groupingExpressions.forall(_.dataType.
-            existsRecursively(SHAMapAccessor.supportedDataTypes)) &&
+        groupingExpressions.forall(e => SHAMapAccessor.supportedDataTypes(e.dataType)) &&
         !useOldImplementationForSingleKey
   }
 

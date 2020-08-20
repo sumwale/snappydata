@@ -159,6 +159,8 @@ case class Trade(sym: UTF8String, ex: UTF8String, price: Decimal,
 
 object TAQTest extends Logging with Assertions {
 
+  val cores: Int = math.min(16, Runtime.getRuntime.availableProcessors())
+
   private[benchmark] var COLUMN_TABLE = true
 
   val EXCHANGES: Array[String] = Array("NYSE", "NASDAQ", "AMEX", "TSE",
@@ -272,7 +274,6 @@ object TAQTest extends Logging with Assertions {
   private val random = new Random()
 
   def newSparkConf(addOn: SparkConf => SparkConf = null): SparkConf = {
-    val cores = math.min(16, Runtime.getRuntime.availableProcessors())
     val conf = new SparkConf()
         .setIfMissing("spark.master", s"local[$cores]")
         .setAppName("microbenchmark")

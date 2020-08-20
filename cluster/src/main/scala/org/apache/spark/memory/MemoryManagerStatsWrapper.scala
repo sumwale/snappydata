@@ -24,6 +24,7 @@ import com.gemstone.gemfire.internal.snappy.memory.{MemoryManagerStats, MemoryMa
   */
 class MemoryManagerStatsWrapper extends MemoryManagerStatsOps {
 
+  @volatile
   private[memory] var stats: MemoryManagerStats = _
 
   def setMemoryManagerStats(mStats: MemoryManagerStats): Unit = {

@@ -185,7 +185,6 @@ node-l -heap-size=4096m -spark.ui.port=9090 -locators=node-b:8888,node-a:9999 -s
 |-snappydata.linkPartitionsToBuckets|When this property is set to true, each bucket is always treated as a separate partition in column/row table scans. When this is set to false, SnappyData creates only as many partitions as executor cores by clubbing multiple buckets into each partition when possible. The default is false.|
 |-snappydata.preferPrimaries|Use this property to configure your preference to use primary buckets in queries. This reduces the scalability of queries in the interest of reduced memory usage for secondary buckets. The default is false.|
 |-snappydata.sql.partitionPruning|Use this property to set/unset the partition pruning of queries.|
-|-snappydata.sql.tokenize|Use this property to enable/disable tokenization.|
 |-snappydata.cache.putIntoInnerJoinResultSize| Use this property with extreme limits such as 1K and 10GB. The default is 100 MB.|
 |-spark.scheduler.pool|Use this property to define scheduler pool to either default or low latency. You can also assign queries to different pools.|
 |-snappydata.enable-experimental-features|Use this property to enable and disable experimental features. You can call out in case some features are completely broken and need to be removed from the product.|

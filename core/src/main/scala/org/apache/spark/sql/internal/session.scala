@@ -923,7 +923,7 @@ private[sql] object ResolveInsertIntoPlan extends Rule[LogicalPlan] with SparkSu
 object LikeEscapeSimplification extends SparkSupport {
 
   private def addTokenizedLiteral(parser: SnappyParser, s: String): Expression = {
-    if (parser ne null) parser.addTokenizedLiteral(UTF8String.fromString(s), StringType)
+    if (parser ne null) parser.addCachedLiteral(UTF8String.fromString(s), StringType)
     else Literal(UTF8String.fromString(s), StringType)
   }
 

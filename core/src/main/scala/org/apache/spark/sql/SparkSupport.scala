@@ -43,7 +43,7 @@ object SparkSupport extends Logging {
    * The default Spark version for which core will be built and must exactly match
    * the version of the embedded SnappyData Spark since this will be used on executors.
    */
-  final val DEFAULT_VERSION = "2.4.5"
+  final val DEFAULT_VERSION = "2.4.6"
 
   private[this] val EXTENDED_VERSION_PATTERN = "([0-9]\\.[0-9]\\.[0-9])\\.[0-9]".r
 

@@ -78,7 +78,7 @@ jar.classifier = 'only'
 shadowJar {
   classifier = null
 
-  // avoid conflict with the 0.9.2 version in stock Spark
+  // relocate to avoid conflict with any incompatible version in classpath (e.g. 0.9.2)
   relocate 'org.apache.thrift', 'io.snappydata.org.apache.thrift'
 
   mergeServiceFiles()

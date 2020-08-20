@@ -202,10 +202,6 @@ object Property extends Enumeration {
       s" then operation will fail. Default value is ${GfxdConstants.MAX_LOCKWAIT_DEFAULT/1000} sec",
     Some(GfxdConstants.MAX_LOCKWAIT_DEFAULT/1000))
 
-  val Tokenize: SQLValue[Boolean] = SQLVal[Boolean](
-    s"${Constant.PROPERTY_PREFIX}sql.tokenize",
-    "Property to enable/disable tokenization", Some(true))
-
   val ParserTraceError: SQLValue[Boolean] = SQLVal[Boolean](
     s"${Constant.PROPERTY_PREFIX}sql.parser.traceError",
     "Property to enable detailed rule tracing for parse errors", Some(false))

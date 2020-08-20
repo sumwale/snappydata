@@ -17,6 +17,7 @@
 package org.apache.spark.sql
 
 import java.util.function.BiConsumer
+import javax.xml.bind.DatatypeConverter
 
 import scala.collection.mutable
 import scala.language.implicitConversions
@@ -25,16 +26,18 @@ import scala.util.{Failure, Success, Try}
 import com.gemstone.gemfire.internal.shared.ClientSharedUtils
 import com.google.common.primitives.Ints
 import io.snappydata.{Property, QueryHint}
+import org.eclipse.collections.impl.stack.mutable.primitive.BooleanArrayStack
 import org.parboiled2._
 import shapeless.{::, HNil}
 
-import org.apache.spark.sql.SnappyParserConsts.plusOrMinus
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{First, Last}
 import org.apache.spark.sql.catalyst.plans._
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, _}
+import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, FunctionIdentifier, TableIdentifier}
+import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.{ShowSnappyTablesCommand, ShowViewsCommand}
 import org.apache.spark.sql.internal.LikeEscapeSimplification
@@ -51,10 +54,10 @@ class SnappyParser(session: SnappySession)
 
   private[this] final var _input: ParserInput = _
 
-  /** counter to deal with nested SELECTs to reset [[_inSelect]] after end of inner SELECT */
+  /** counter to deal with nested SELECTs to reset [[_inProjection]] after end of inner SELECT */
   private[this] final var _selectContext: Int = _
   /** set to true if parser is within the projection portion of a SELECT statement */
-  private[this] final var _inSelect: Boolean = _
+  private[this] final var _inProjection: Boolean = _
 
   protected final var _questionMarkCounter: Int = _
   protected final var _isPreparePhase: Boolean = _
@@ -62,9 +65,6 @@ class SnappyParser(session: SnappySession)
   protected final var _fromRelations: mutable.Stack[LogicalPlan] = new mutable.Stack[LogicalPlan]
   // type info for parameters of a prepared statement
   protected final var _preparedParamsTypesInfo: Option[Array[Int]] = None
-
-  protected final def legacySetOpsPrecedence: Boolean = session.sessionState.conf.getConfString(
-    "spark.sql.legacy.setopsPrecedence.enabled", "false").toBoolean
 
   override final def input: ParserInput = _input
 
@@ -75,7 +75,7 @@ class SnappyParser(session: SnappySession)
     _input = in
     clearConstants()
     _questionMarkCounter = 0
-    tokenize = false
+    cacheLiteral = false
   }
 
   private[sql] final def isPreparePhase: Boolean = _isPreparePhase
@@ -90,20 +90,15 @@ class SnappyParser(session: SnappySession)
     _preparedParamsTypesInfo = Option(info)
   }
 
-  protected final type WhenElseType = (Seq[(Expression, Expression)],
-      Option[Expression])
-  protected final type JoinRuleType = (Option[JoinType], LogicalPlan,
-      Option[Expression])
-
   private def toDecimalLiteral(s: String, checkExactNumeric: Boolean): Expression = {
     val decimal = BigDecimal(s)
     if (checkExactNumeric) {
       try {
         val longValue = decimal.toLongExact
         if (longValue >= Int.MinValue && longValue <= Int.MaxValue) {
-          return newTokenizedLiteral(longValue.toInt, IntegerType)
+          return newCachedLiteral(longValue.toInt, IntegerType)
         } else {
-          return newTokenizedLiteral(longValue, LongType)
+          return newCachedLiteral(longValue, LongType)
         }
       } catch {
         case _: ArithmeticException =>
@@ -113,13 +108,13 @@ class SnappyParser(session: SnappySession)
     val scale = decimal.scale
     val sysDefaultType = DecimalType.SYSTEM_DEFAULT
     if (precision == sysDefaultType.precision && scale == sysDefaultType.scale) {
-      newTokenizedLiteral(Decimal(decimal), sysDefaultType)
+      newCachedLiteral(Decimal(decimal), sysDefaultType)
     } else {
       val userDefaultType = DecimalType.USER_DEFAULT
       if (precision == userDefaultType.precision && scale == userDefaultType.scale) {
-        newTokenizedLiteral(Decimal(decimal), userDefaultType)
+        newCachedLiteral(Decimal(decimal), userDefaultType)
       } else {
-        newTokenizedLiteral(Decimal(decimal), DecimalType(Math.max(precision, scale), scale))
+        newCachedLiteral(Decimal(decimal), DecimalType(Math.max(precision, scale), scale))
       }
     }
   }
@@ -137,34 +132,34 @@ class SnappyParser(session: SnappySession)
           s.charAt(len - 2) match {
             case 'B' | 'b' => return toDecimalLiteral(s.substring(0, len - 2),
               checkExactNumeric = false)
-            case c if Character.isDigit(c) => return newTokenizedLiteral(
+            case c if Character.isDigit(c) => return newCachedLiteral(
               java.lang.Double.parseDouble(s.substring(0, len - 1)), DoubleType)
             case _ => throw new ParseException(s"Found non numeric token $s")
           }
         } else {
-          return newTokenizedLiteral(
+          return newCachedLiteral(
             java.lang.Double.parseDouble(s.substring(0, len - 1)), DoubleType)
         }
       case 'F' | 'f' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newTokenizedLiteral(
+        return newCachedLiteral(
           java.lang.Float.parseFloat(s.substring(0, len - 1)), FloatType)
       } else {
         throw new ParseException(s"Found non numeric token $s")
       }
       case 'L' | 'l' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newTokenizedLiteral(
+        return newCachedLiteral(
           java.lang.Long.parseLong(s.substring(0, len - 1)), LongType)
       } else {
         throw new ParseException(s"Found non numeric token $s")
       }
       case 'S' | 's' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newTokenizedLiteral(
+        return newCachedLiteral(
           java.lang.Short.parseShort(s.substring(0, len - 1)), ShortType)
       } else {
         throw new ParseException(s"Found non numeric token $s")
       }
       case 'B' | 'b' | 'Y' | 'y' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newTokenizedLiteral(
+        return newCachedLiteral(
           java.lang.Byte.parseByte(s.substring(0, len - 1)), ByteType)
       } else {
         throw new ParseException(s"Found non numeric token $s")
@@ -178,7 +173,7 @@ class SnappyParser(session: SnappySession)
       } else if (c == 'e' || c == 'E') {
         // follow the behavior in MS SQL Server
         // https://msdn.microsoft.com/en-us/library/ms179899.aspx
-        return newTokenizedLiteral(java.lang.Double.parseDouble(s), DoubleType)
+        return newCachedLiteral(java.lang.Double.parseDouble(s), DoubleType)
       }
       index += 1
     }
@@ -188,9 +183,9 @@ class SnappyParser(session: SnappySession)
       try {
         val longValue = java.lang.Long.parseLong(s)
         if (longValue >= Int.MinValue && longValue <= Int.MaxValue) {
-          newTokenizedLiteral(longValue.toInt, IntegerType)
+          newCachedLiteral(longValue.toInt, IntegerType)
         } else {
-          newTokenizedLiteral(longValue, LongType)
+          newCachedLiteral(longValue, LongType)
         }
       } catch {
         case _: NumberFormatException =>
@@ -233,13 +228,35 @@ class SnappyParser(session: SnappySession)
     }
   }
 
+  private final def handleException[T](body: => T, valueType: String, s: String): T = {
+    try {
+      body
+    } catch {
+      case e: ParseException => throw e
+      case e: Exception =>
+        throw new ParseException(s"Exception parsing '$s' of type '$valueType'", Some(e))
+    }
+  }
+
   protected final def literal: Rule1[Expression] = rule {
-    stringLiteral ~> ((s: String) => newTokenizedLiteral(UTF8String.fromString(s), StringType)) |
-    numericLiteral ~> ((s: String) => toNumericLiteral(s)) |
-    booleanLiteral ~> ((b: Boolean) => newTokenizedLiteral(b, BooleanType)) |
-    hexLiteral ~> ((b: Array[Byte]) => newTokenizedLiteral(b, BinaryType)) |
-    intervalExpression |
-    NULL ~> (() => Literal(null, NullType)) // no tokenization for nulls
+    stringLiteral ~ (
+        stringLiteral. + ~> ((s: String, ss: Seq[String]) =>
+          newCachedLiteral(UTF8String.fromString((s +: ss).mkString), StringType)) |
+        MATCH ~> ((s: String) => newCachedLiteral(UTF8String.fromString(s), StringType))
+    ) |
+    numericLiteral ~> ((s: String) => handleException(toNumericLiteral(s), "number", s)) |
+    booleanLiteral ~> ((b: Boolean) => newCachedLiteral(b, BooleanType)) |
+    NULL ~> (() => newLiteral(null, NullType)) | // no ParamLiterals for nulls
+    (ch('X') | ch('x')) ~ ws ~ stringLiteral ~> ((s: String) =>
+      handleException(newCachedLiteral(DatatypeConverter.parseHexBinary(
+        if ((s.length & 0x1) == 1) "0" + s else s), BinaryType), "hex", s)) |
+    DATE ~ stringLiteral ~> ((s: String) =>
+      handleException(newCachedLiteral(DateTimeUtils.fromJavaDate(
+        java.sql.Date.valueOf(s)), DateType), "date", s)) |
+    TIMESTAMP ~ stringLiteral ~> ((s: String) =>
+      handleException(newCachedLiteral(DateTimeUtils.fromJavaTimestamp(
+        java.sql.Timestamp.valueOf(s)), TimestampType), "timestamp", s)) |
+    intervalExpression
   }
 
   protected final def questionMark: Rule1[Expression] = rule {
@@ -251,8 +268,8 @@ class SnappyParser(session: SnappySession)
         counter.value = _questionMarkCounter
         counter.isNull = false
         // foldable condition same as that in newTokenizedLiteral
-        ParamLiteral(counter, NullType, 0, execId = -1, tokenized = true).markFoldable(
-          !canTokenize || !tokenize)
+        ParamLiteral(counter, NullType, 0, execId = -1, tokenized = true).
+            markFoldable(!cacheLiteral)
       } else {
         assert(_parameterValueSet.isDefined,
           "For Prepared Statement, Parameter constants are not provided")
@@ -260,80 +277,84 @@ class SnappyParser(session: SnappySession)
           _questionMarkCounter, _parameterValueSet.get, _preparedParamsTypesInfo)
         val catalystTypeVal = CatalystTypeConverters.createToCatalystConverter(
           dataType)(scalaTypeVal)
-        newTokenizedLiteral(catalystTypeVal, dataType)
+        newCachedLiteral(catalystTypeVal, dataType)
       }
     })
   }
 
-  private[sql] final def addTokenizedLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
+  private[sql] final def addCachedLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
     if (session.planCaching) addParamLiteralToContext(v, dataType)
     else new TokenLiteral(v, dataType)
   }
 
-  protected final def newTokenizedLiteral(v: Any, dataType: DataType): Expression = {
-    if (tokenize) {
-      if (canTokenize) addTokenizedLiteral(v, dataType) else new TokenLiteral(v, dataType)
-    } else Literal(v, dataType)
+  protected final def newCachedLiteral(v: Any, dataType: DataType): Expression = {
+    if (cacheLiteral) addCachedLiteral(v, dataType)
+    else new TokenLiteral(v, dataType)
   }
 
   protected final def newLiteral(v: Any, dataType: DataType): Expression = {
-    if (tokenize) new TokenLiteral(v, dataType) else Literal(v, dataType)
+    new TokenLiteral(v, dataType)
   }
 
   protected final def intervalType: Rule1[DataType] = rule {
     INTERVAL ~> (() => CalendarIntervalType)
   }
 
-  protected def intervalExpression: Rule1[Expression] = rule {
+  private final def fromCalendarString(unit: String, s: String): CalendarInterval =
+    handleException(CalendarInterval.fromSingleUnitString(unit, s), s"interval($unit)", s)
+
+  protected final def intervalExpression: Rule1[Expression] = rule {
     INTERVAL ~ (
         stringLiteral ~ (
-            YEAR ~ TO ~ MONTH ~> ((s: String) => CalendarInterval.fromYearMonthString(s)) |
-            DAY ~ TO ~ (SECOND | SECS) ~> ((s: String) => CalendarInterval.fromDayTimeString(s))
+            YEAR ~ TO ~ MONTH ~> ((s: String) => handleException(
+              CalendarInterval.fromYearMonthString(s), "interval(year to month)", s)) |
+            DAY ~ TO ~ (SECOND | SECS) ~> ((s: String) => handleException(
+              CalendarInterval.fromDayTimeString(s), "interval(day to second)", s))
         ) |
         (stringLiteral | integral | expression) ~ (
             YEAR ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("year", s)
+              case s: String => fromCalendarString("year", s)
               case _ => v.asInstanceOf[Expression] -> -1L
             }) |
             MONTH ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("month", s)
+              case s: String => fromCalendarString("month", s)
               case _ => v.asInstanceOf[Expression] -> -2L
             }) |
             WEEK ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("week", s)
+              case s: String => fromCalendarString("week", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_WEEK
             }) |
             DAY ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("day", s)
+              case s: String => fromCalendarString("day", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_DAY
             }) |
             HOUR ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("hour", s)
+              case s: String => fromCalendarString("hour", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_HOUR
             }) |
             (MINUTE | MINS) ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("minute", s)
+              case s: String => fromCalendarString("minute", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_MINUTE
             }) |
             (SECOND | SECS) ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("second", s)
+              case s: String => fromCalendarString("second", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_SECOND
             }) |
             (MILLISECOND | MILLIS) ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("millisecond", s)
+              case s: String => fromCalendarString("millisecond", s)
               case _ => v.asInstanceOf[Expression] -> CalendarInterval.MICROS_PER_MILLI
             }) |
             (MICROSECOND | MICROS) ~> ((v: Any) => v match {
-              case s: String => CalendarInterval.fromSingleUnitString("microsecond", s)
+              case s: String => fromCalendarString("microsecond", s)
               case _ => v.asInstanceOf[Expression] -> 1L
             })
         )
     ). + ~> ((s: Seq[Any]) =>
       if (s.length == 1) s.head match {
-        case c: CalendarInterval => newTokenizedLiteral(c, CalendarIntervalType)
+        case c: CalendarInterval => newCachedLiteral(c, CalendarIntervalType)
         case (e: Expression, u: Long) => IntervalExpression(e :: Nil, u :: Nil)
       } else if (s.forall(_.isInstanceOf[CalendarInterval])) {
-        newTokenizedLiteral(s.reduce((v1, v2) => v1.asInstanceOf[CalendarInterval].add(
+        newCachedLiteral(s.reduce((v1, v2) => v1.asInstanceOf[CalendarInterval].add(
           v2.asInstanceOf[CalendarInterval])), CalendarIntervalType)
       } else {
         val (expressions, units) = s.flatMap {
@@ -403,85 +424,295 @@ class SnappyParser(session: SnappySession)
     ws ~ (column + commaSep) ~ EOI
   }
 
-  protected final def expression: Rule1[Expression] = rule {
-    andExpression ~ (OR ~ andExpression ~>
-        ((e1: Expression, e2: Expression) => Or(e1, e2))).*
-  }
-
-  protected final def expressionList: Rule1[Seq[Expression]] = rule {
-    O_PAREN ~ (expression * commaSep) ~ C_PAREN ~> ((e: Any) => e.asInstanceOf[Seq[Expression]])
-  }
-
-  protected final def expressionNoTokens: Rule1[Expression] = rule {
-    push(tokenize) ~ TOKENIZE_END ~ expression ~> { (tokenized: Boolean, e: Expression) =>
-      tokenize = tokenized
-      e
+  protected final def handleExtract(fn: String, e: Expression): Expression = {
+    Utils.toLowerCase(fn) match {
+      case "year" => Year(e)
+      case "quarter" => Quarter(e)
+      case "month" => Month(e)
+      case "week" => WeekOfYear(e)
+      case "day" => DayOfMonth(e)
+      case "dayofweek" => DayOfWeek(e)
+      case "hour" => Hour(e)
+      case "minute" => Minute(e)
+      case "second" => Second(e)
+      case _ => throw new ParseException(s"Literals of type '$fn' are currently not supported.")
     }
   }
 
-  protected final def andExpression: Rule1[Expression] = rule {
-    notExpression ~ (AND ~ notExpression ~>
-        ((e1: Expression, e2: Expression) => And(e1, e2))).*
+  protected final def foldableFunctionsExpressionHandler(exprs: IndexedSeq[Expression],
+      fnName: String): Seq[Expression] = Consts.FOLDABLE_FUNCTIONS.get(fnName) match {
+    case null => exprs
+    case args if args.length == 0 =>
+      // disable plan caching for these functions
+      session.planCaching = false
+      exprs
+    case args =>
+      exprs.indices.map(index => exprs(index).transformUp {
+        case l: TokenizedLiteral if (args(0) == -3 && !Ints.contains(args, index)) ||
+            (args(0) != -3 && (Ints.contains(args, index) ||
+                // all args          // all odd args
+                (args(0) == -10) || (args(0) == -1 && (index & 0x1) == 1) ||
+                // all even args
+                (args(0) == -2 && (index & 0x1) == 0))) =>
+          l match {
+            case pl: ParamLiteral if pl.tokenized && _isPreparePhase =>
+              throw new ParseException(s"function $fnName cannot have " +
+                  s"parameterized argument at position ${index + 1}")
+            case _ =>
+          }
+          removeIfParamLiteralFromContext(l)
+          newLiteral(l.value, l.dataType)
+        case e => e
+      })
   }
 
-  protected final def notExpression: Rule1[Expression] = rule {
-    (NOT ~ push(true)).? ~ comparisonExpression ~> ((not: Any, e: Expression) =>
-      if (not.asInstanceOf[Option[Boolean]].isEmpty) e else Not(e))
+  protected final def primaryExpression: Rule1[Expression] = rule {
+    literal |
+    questionMark |
+    '*' ~ ws ~> (() => UnresolvedStar(None)) |
+    CAST ~ O_PAREN ~ expression ~ AS ~ (dataType | intervalType) ~ C_PAREN ~> (Cast(_, _)) |
+    CASE ~ (
+        whenClause. + ~ (ELSE ~ expression).? ~ END ~> ((altPart: Seq[(Expression, Expression)],
+            elsePart: Any) => CaseWhen(altPart, elsePart.asInstanceOf[Option[Expression]])) |
+        expression ~ whenClause. + ~ (ELSE ~ expression).? ~ END ~>
+            ((key: Expression, altPart: Seq[(Expression, Expression)], elsePart: Any) =>
+              CaseWhen(altPart.map(e => EqualTo(key, e._1) -> e._2),
+                elsePart.asInstanceOf[Option[Expression]]))
+    ) |
+    CURRENT_DATE ~ (O_PAREN ~ C_PAREN).? ~> (() => CurrentDate()) |
+    CURRENT_TIMESTAMP ~ (O_PAREN ~ C_PAREN).? ~> CurrentTimestamp |
+    STRUCT ~ O_PAREN ~ namedExpressionSeq.? ~ C_PAREN ~> ((e: Any) => e match {
+      case None => CreateStruct(Nil)
+      case Some(s) => CreateStruct(s.asInstanceOf[Seq[Expression]])
+    }) |
+    FIRST ~ O_PAREN ~ expression ~ (
+        IGNORE ~ NULLS ~> ((e: Expression) =>
+          First(e, newLiteral(true, BooleanType)).toAggregateExpression()) |
+        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
+          Consts.FIRST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
+              Seq[Expression]].toIndexedSeq, Consts.FIRST.lower), isDistinct = false))
+    ) ~ C_PAREN |
+    LAST ~ O_PAREN ~ expression ~ (
+        IGNORE ~ NULLS ~> ((e: Expression) =>
+          Last(e, newLiteral(true, BooleanType)).toAggregateExpression()) |
+        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
+          Consts.LAST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
+              Seq[Expression]].toIndexedSeq, Consts.LAST.lower), isDistinct = false))
+    ) ~ C_PAREN |
+    POSITION ~ O_PAREN ~ expression ~ (
+        IN ~ expression ~> ((sub: Expression, str: Expression) => new StringLocate(sub, str)) |
+        (commaSep ~ expression). + ~> ((sub: Expression, args: Any) => UnresolvedFunction(
+          Consts.POSITION.lower, sub +: args.asInstanceOf[Seq[Expression]], isDistinct = false))
+    ) ~ C_PAREN |
+    TRIM ~ O_PAREN ~ (
+        (BOTH ~ push(0) | LEADING ~ push(1) | TRAILING ~ push(2)) ~ valueExpression ~
+            FROM ~ valueExpression ~> { (flag: Int, trim: Expression, src: Expression) =>
+          val funcName = flag match {
+            case 0 => Consts.TRIM.lower
+            case 1 => "ltrim"
+            case 2 => "rtrim"
+          }
+          UnresolvedFunction(funcName, trim :: src :: Nil, isDistinct = false)
+        } |
+        (expression + commaSep) ~> ((args: Seq[Expression]) =>
+          UnresolvedFunction(Consts.TRIM.lower, args, isDistinct = false))
+    ) ~ C_PAREN |
+    EXTRACT ~ O_PAREN ~ identifier ~ FROM ~ valueExpression ~ C_PAREN ~> handleExtract _ |
+    identifierWithQuotedFlag ~ (
+      "->" ~ ws ~ expression ~> ((id: String, e: Expression) =>
+        internals.newLambdaFunction(e, UnresolvedAttribute(id :: Nil) :: Nil)) |
+      stringLiteral ~> ((v: String, valueType: String) =>
+        try {
+          Utils.toLowerCase(valueType) match {
+            case "date" => newCachedLiteral(DateTimeUtils.fromJavaDate(
+              java.sql.Date.valueOf(v)), DateType)
+            case "timestamp" => newCachedLiteral(DateTimeUtils.fromJavaTimestamp(
+              java.sql.Timestamp.valueOf(v)), TimestampType)
+            case "x" => newCachedLiteral(DatatypeConverter.parseHexBinary(
+              if ((v.length & 0x1) == 1) "0" + v else v), BinaryType)
+            case _ =>
+              throw new ParseException(s"Literals of type '$valueType' are not supported.")
+          }
+        } catch {
+          case e: IllegalArgumentException =>
+            throw new ParseException(s"Exception parsing '$v' of type '$valueType'", Some(e))
+        }) |
+      ('.' ~ ws ~ identifierWithQuotedFlag).* ~> { (id: String, ids: Any) =>
+        val idSeq = ids.asInstanceOf[Seq[String]]
+        if (idSeq.isEmpty) id :: Nil else (id +: idSeq).toIndexedSeq
+      } ~ (
+        '.' ~ ws ~ '*' ~ ws ~> ((ids: Seq[String]) => UnresolvedStar(Some(ids))) |
+        O_PAREN ~ setQuantifier ~ (expression * commaSep) ~ C_PAREN ~ (OVER ~ windowSpec).? ~> {
+          (ids: Seq[String], a: Option[Boolean], args: Any, w: Any) =>
+            val id = ids.head
+            val fnName = ids.length match {
+              case 1 => new FunctionIdentifier(id)
+              case 2 => new FunctionIdentifier(ids(1), Some(id))
+              case _ =>
+                throw new ParseException(s"Unsupported function name '${ids.mkString(".")}'")
+            }
+            val allExprs = args.asInstanceOf[Seq[Expression]].toIndexedSeq
+            val exprs = foldableFunctionsExpressionHandler(allExprs, id)
+            val function = if (!a.contains(false)) {
+              // convert COUNT(*) to COUNT(1)
+              if (fnName.database.isEmpty && fnName.funcName.equalsIgnoreCase("count") &&
+                  exprs.length == 1 && exprs.head == UnresolvedStar(None)) {
+                UnresolvedFunction(fnName, newLiteral(1, IntegerType) :: Nil, isDistinct = false)
+              } else UnresolvedFunction(fnName, exprs, isDistinct = false)
+            } else {
+              UnresolvedFunction(fnName, exprs, isDistinct = true)
+            }
+            w.asInstanceOf[Option[WindowSpec]] match {
+              case None => function
+              case Some(spec: WindowSpecDefinition) => WindowExpression(function, spec)
+              case Some(ref: WindowSpecReference) => UnresolvedWindowExpression(function, ref)
+            }
+        } |
+        // noinspection ScalaUnnecessaryParentheses
+        MATCH ~> { (ids: Seq[String]) =>
+          val idLen = ids.length
+          if (idLen <= 2 && quotedRegexColumnNames && isQuoted && _inProjection) {
+            if (idLen == 1) internals.newUnresolvedRegex(ids.head, None, caseSensitive)
+            else internals.newUnresolvedRegex(ids(1), Some(ids.head), caseSensitive)
+          } else UnresolvedAttribute(ids)
+        }
+      )
+    ) |
+    O_PAREN ~ (
+        (namedExpression + commaSep) ~ C_PAREN ~ (
+            "->" ~ expression ~> ((args: Seq[Expression], e: Expression) =>
+              internals.newLambdaFunction(e, args)) |
+            MATCH ~> ((exprs: Seq[Expression]) =>
+              if (exprs.length == 1) exprs.head else CreateStruct(exprs))
+        ) |
+        // noinspection ScalaUnnecessaryParentheses
+        query ~ C_PAREN ~> { (plan: LogicalPlan) =>
+          session.planCaching = false // never cache scalar subquery plans
+          ScalarSubquery(plan)
+        }
+    ) |
+    '{' ~ ws ~ FN ~ functionIdentifier ~ expressionList ~
+        '}' ~ ws ~> { (fn: FunctionIdentifier, e: Seq[Expression]) =>
+      val exprs = foldableFunctionsExpressionHandler(e.toIndexedSeq, fn.funcName)
+      fn match {
+        case f if f.funcName.equalsIgnoreCase("timestampadd") =>
+          assert(exprs.length == 3)
+          assert(exprs.head.isInstanceOf[UnresolvedAttribute] &&
+              exprs.head.asInstanceOf[UnresolvedAttribute].name.equalsIgnoreCase("sql_tsi_day"))
+          DateAdd(exprs(2), exprs(1))
+        case f => UnresolvedFunction(f, exprs, isDistinct = false)
+      }
+    }
   }
 
-  protected final def comparisonExpression: Rule1[Expression] = rule {
-    termExpression ~ (
-        '=' ~ '='.? ~ ws ~ termExpression ~> EqualTo |
+  /*
+   * Various '*Expression' rules below are arranged as per operator precedence:
+   * [], .                               => resolveExpression
+   * UNARY (+, -, ~)                     => unaryExpression
+   * *, /, DIV, %                        => multPrecExpression
+   * +, -, ||, &, |, ^                   => sumPrecExpression
+   * comparison operators, >>, >>>, <<   => valueExpression (same as in SqlBase.g4)
+   * NOT, EXISTS, IS NOT? NULL, LIKE etc => booleanExpression
+   * AND                                 => andExpression
+   * OR                                  => expression
+   *
+   * Lower precedence rules refer to the rule one step higher.
+   */
+
+  private final def resolveExpression: Rule1[Expression] = rule {
+    primaryExpression ~ (
+        '[' ~ ws ~ valueExpression ~ ']' ~ ws ~> UnresolvedExtractValue |
+        '.' ~ ws ~ identifier ~> ((base: Expression, attr: String) =>
+          UnresolvedExtractValue(base, newLiteral(UTF8String.fromString(attr), StringType)))
+    ).*
+  }
+
+  private final def unaryExpression: Rule1[Expression] = rule {
+    resolveExpression |
+    capture(Consts.unaryOperator) ~ ws ~ resolveExpression ~> ((s: String, e: Expression) =>
+      if (s.charAt(0) == '-') UnaryMinus(e) else if (s.charAt(0) == '~') BitwiseNot(e) else e)
+  }
+
+  private final def multPrecExpression: Rule1[Expression] = rule {
+    unaryExpression ~ (
+        capture(Consts.multPrecOperator) ~ ws ~ unaryExpression ~>
+            ((e1: Expression, op: String, e2: Expression) => op.charAt(0) match {
+              case '*' => Multiply(e1, e2)
+              case '/' => Divide(e1, e2)
+              case '%' => Remainder(e1, e2)
+              case c => throw new IllegalStateException(s"Unexpected operator '$c'")
+            }) |
+        DIV ~ unaryExpression ~> ((e1: Expression, e2: Expression) =>
+          Cast(Divide(e1, e2), LongType))
+    ).*
+  }
+
+  private final def sumPrecExpression: Rule1[Expression] = rule {
+    multPrecExpression ~ (
+        capture(Consts.sumPrecOperator) ~ ws ~ multPrecExpression ~>
+            ((e1: Expression, op: String, e2: Expression) => op.charAt(0) match {
+              case '+' => Add(e1, e2)
+              case '-' => Subtract(e1, e2)
+              case '&' => BitwiseAnd(e1, e2)
+              case '^' => BitwiseXor(e1, e2)
+              case c => throw new IllegalStateException(s"Unexpected operator '$c'")
+            }) |
+        '|' ~ (
+            '|' ~ ws ~ multPrecExpression ~> ((e1: Expression, e2: Expression) =>
+              e1 match {
+                case Concat(children) => Concat(children :+ e2)
+                case _ => Concat(e1 :: e2 :: Nil)
+              }) |
+            ws ~ multPrecExpression ~> BitwiseOr
+        )
+    ).*
+  }
+
+  protected final def valueExpression: Rule1[Expression] = rule {
+    sumPrecExpression ~ (
+        '=' ~ '='.? ~ ws ~ sumPrecExpression ~> EqualTo |
         '>' ~ (
-          '=' ~ ws ~ termExpression ~> GreaterThanOrEqual |
-          '>' ~ (
-            '>' ~ ws ~ termExpression ~> ShiftRightUnsigned |
-            ws ~ termExpression ~> ShiftRight
-          ) |
-          ws ~ termExpression ~> GreaterThan
+            '=' ~ ws ~ sumPrecExpression ~> GreaterThanOrEqual |
+            '>' ~ (
+                '>' ~ ws ~ sumPrecExpression ~> ShiftRightUnsigned |
+                ws ~ sumPrecExpression ~> ShiftRight
+            ) |
+            ws ~ sumPrecExpression ~> GreaterThan
         ) |
         '<' ~ (
-          '=' ~ (
-            '>' ~ ws ~ termExpression ~> EqualNullSafe |
-            ws ~ termExpression ~> LessThanOrEqual
-          ) |
-          '>' ~ ws ~ termExpression ~>
-              ((e1: Expression, e2: Expression) => Not(EqualTo(e1, e2))) |
-          '<' ~ ws ~ termExpression ~> ShiftLeft |
-          ws ~ termExpression ~> LessThan
+            '=' ~ (
+                '>' ~ ws ~ sumPrecExpression ~> EqualNullSafe |
+                ws ~ sumPrecExpression ~> LessThanOrEqual
+            ) |
+            '>' ~ ws ~ sumPrecExpression ~>
+                ((e1: Expression, e2: Expression) => Not(EqualTo(e1, e2))) |
+            '<' ~ ws ~ sumPrecExpression ~> ShiftLeft |
+            ws ~ sumPrecExpression ~> LessThan
         ) |
-        '!' ~ '=' ~ ws ~ termExpression ~>
-            ((e1: Expression, e2: Expression) => Not(EqualTo(e1, e2))) |
-        invertibleExpression |
-        IS ~ (
-            (NOT ~ push(true)).? ~ NULL ~> ((e: Expression, not: Any) =>
-              if (not.asInstanceOf[Option[Boolean]].isEmpty) IsNull(e)
-              else IsNotNull(e)) |
-            (NOT ~ push(true)).? ~ DISTINCT ~ FROM ~
-                termExpression ~> ((e1: Expression, not: Any, e2: Expression) =>
-              if (not.asInstanceOf[Option[Boolean]].isDefined) EqualNullSafe(e1, e2)
-              else Not(EqualNullSafe(e1, e2)))
-        ) |
-        NOT ~ invertibleExpression ~> Not |
-        MATCH.asInstanceOf[Rule[Expression::HNil, Expression::HNil]]
-    )
+        '!' ~ (
+            '=' ~ ws ~ sumPrecExpression ~> ((e1: Expression, e2: Expression) =>
+              Not(EqualTo(e1, e2))) |
+            '<' ~ ws ~ sumPrecExpression ~> GreaterThanOrEqual |
+            '>' ~ ws ~ sumPrecExpression ~> LessThanOrEqual
+        )
+    ).*
   }
 
-  protected final def likeExpression(left: Expression, right: TokenizedLiteral): Expression = {
+  protected final def toLikeExpression(left: Expression, right: TokenizedLiteral): Expression = {
     val pattern = right.valueString
     removeIfParamLiteralFromContext(right)
     if (Consts.optimizableLikePattern.matcher(pattern).matches()) {
       val size = pattern.length
       val expression = if (pattern.charAt(0) == '%') {
         if (pattern.charAt(size - 1) == '%') {
-          Contains(left, addTokenizedLiteral(
+          Contains(left, addCachedLiteral(
             UTF8String.fromString(pattern.substring(1, size - 1)), StringType))
         } else {
-          EndsWith(left, addTokenizedLiteral(
+          EndsWith(left, addCachedLiteral(
             UTF8String.fromString(pattern.substring(1)), StringType))
         }
       } else if (pattern.charAt(size - 1) == '%') {
-        StartsWith(left, addTokenizedLiteral(
+        StartsWith(left, addCachedLiteral(
           UTF8String.fromString(pattern.substring(0, size - 1)), StringType))
       } else {
         // check for startsWith and endsWith
@@ -489,14 +720,14 @@ class SnappyParser(session: SnappySession)
         if (wildcardIndex != -1) {
           val prefix = pattern.substring(0, wildcardIndex)
           val postfix = pattern.substring(wildcardIndex + 1)
-          val prefixLiteral = addTokenizedLiteral(UTF8String.fromString(prefix), StringType)
-          val suffixLiteral = addTokenizedLiteral(UTF8String.fromString(postfix), StringType)
+          val prefixLiteral = addCachedLiteral(UTF8String.fromString(prefix), StringType)
+          val suffixLiteral = addCachedLiteral(UTF8String.fromString(postfix), StringType)
           And(GreaterThanOrEqual(Length(left),
-            addTokenizedLiteral(prefix.length + postfix.length, IntegerType)),
+            addCachedLiteral(prefix.length + postfix.length, IntegerType)),
             And(StartsWith(left, prefixLiteral), EndsWith(left, suffixLiteral)))
         } else {
           // no wildcards
-          EqualTo(left, addTokenizedLiteral(UTF8String.fromString(pattern), StringType))
+          EqualTo(left, addCachedLiteral(UTF8String.fromString(pattern), StringType))
         }
       }
       expression
@@ -507,27 +738,26 @@ class SnappyParser(session: SnappySession)
   }
 
   /**
-    * Expressions which can be preceeded by a NOT. This assumes one expression
-    * already pushed on stack which it will pop and then push back the result
-    * Expression (hence the slightly odd looking type)
-    */
-  protected final def invertibleExpression: Rule[Expression :: HNil,
+   * Expressions which can be preceded by a NOT. This assumes one expression
+   * already pushed on stack which it will pop and then push back the result
+   * Expression (hence the slightly odd looking type)
+   */
+  private final def predicate: Rule[Expression :: HNil,
       Expression :: HNil] = rule {
-    LIKE ~ termExpression ~>
+    LIKE ~ valueExpression ~>
         ((e1: Expression, e2: Expression) => e2 match {
-          case l: TokenizedLiteral if !l.value.isInstanceOf[MutableInt] => likeExpression(e1, l)
+          case l: TokenizedLiteral if !l.value.isInstanceOf[MutableInt] => toLikeExpression(e1, l)
           case _ => Like(e1, e2)
         }) |
     IN ~ O_PAREN ~ (
-        (termExpression * commaSep) ~> ((e: Expression, es: Any) =>
+        (expression + commaSep) ~> ((e: Expression, es: Any) =>
           In(e, es.asInstanceOf[Seq[Expression]])) |
-        query ~> ((e1: Expression, plan: LogicalPlan) =>
-          internals.newInSubquery(e1, plan))
-        ) ~ C_PAREN |
-    BETWEEN ~ termExpression ~ AND ~ termExpression ~>
+        query ~> ((e1: Expression, plan: LogicalPlan) => internals.newInSubquery(e1, plan))
+    ) ~ C_PAREN |
+    BETWEEN ~ valueExpression ~ AND ~ valueExpression ~>
         ((e: Expression, el: Expression, eu: Expression) =>
           And(GreaterThanOrEqual(e, el), LessThanOrEqual(e, eu))) |
-    (RLIKE | REGEXP) ~ termExpression ~>
+    (RLIKE | REGEXP) ~ valueExpression ~>
         ((e1: Expression, e2: Expression) => e2 match {
           case l: TokenizedLiteral if !l.value.isInstanceOf[MutableInt] =>
             removeIfParamLiteralFromContext(l)
@@ -536,48 +766,34 @@ class SnappyParser(session: SnappySession)
         })
   }
 
-  protected final def termExpression: Rule1[Expression] = rule {
-    productExpression ~ (capture(plusOrMinus) ~ ws ~ productExpression ~>
-        ((e1: Expression, op: String, e2: Expression) =>
-          if (op.charAt(0) == '+') Add(e1, e2) else Subtract(e1, e2))).*
+  private final def booleanExpression: Rule1[Expression] = rule {
+    NOT ~ booleanExpression ~> Not |
+    EXISTS ~ O_PAREN ~ query ~ C_PAREN ~> (Exists(_)) |
+    valueExpression ~ (
+        predicate |
+        NOT ~ predicate ~> Not |
+        IS ~ (
+            (NOT ~ push(true)).? ~ NULL ~> ((e: Expression, not: Any) =>
+              if (not == None) IsNull(e) else IsNotNull(e)) |
+            (NOT ~ push(true)).? ~ DISTINCT ~ FROM ~
+                valueExpression ~> ((e1: Expression, not: Any, e2: Expression) =>
+              if (not == None) Not(EqualNullSafe(e1, e2)) else EqualNullSafe(e1, e2))
+        ) |
+        MATCH.asInstanceOf[Rule[Expression::HNil, Expression::HNil]]
+    )
   }
 
-  protected final def productExpression: Rule1[Expression] = rule {
-    primary ~ (
-        "||" ~ ws ~ primary ~> ((e1: Expression, e2: Expression) =>
-          e1 match {
-            case Concat(children) => Concat(children :+ e2)
-            case _ => Concat(Seq(e1, e2))
-          }) |
-        capture(Consts.arithmeticOperator) ~ ws ~ primary ~>
-            ((e1: Expression, op: String, e2: Expression) =>
-          op.charAt(0) match {
-            case '*' => Multiply(e1, e2)
-            case '/' => Divide(e1, e2)
-            case '%' => Remainder(e1, e2)
-            case '&' => BitwiseAnd(e1, e2)
-            case '|' => BitwiseOr(e1, e2)
-            case '^' => BitwiseXor(e1, e2)
-            case c => throw new IllegalStateException(
-              s"unexpected operation '$c'")
-          }) |
-        '[' ~ ws ~ termExpression ~ ']' ~ ws ~> ((base: Expression, extraction: Expression) => {
-          // extraction should be a literal if type is string (integer can be ParamLiteral)
-          val ord = extraction match {
-            case l: TokenizedLiteral if l.dataType == StringType =>
-              removeIfParamLiteralFromContext(l)
-              newLiteral(l.value, l.dataType)
-            case o => o
-          }
-          UnresolvedExtractValue(base, ord)
-        }) |
-        '.' ~ ws ~ identifier ~> ((base: Expression, attr: String) =>
-          UnresolvedExtractValue(base, newLiteral(UTF8String.fromString(attr), StringType)))
-    ).*
+  private final def andExpression: Rule1[Expression] = rule {
+    booleanExpression ~ (AND ~ booleanExpression ~> And).*
   }
 
-  protected final def canApplyRegex: Boolean =
-    _inSelect && session.conf.get(Consts.quotedRegexColumnNames, "false").equalsIgnoreCase("true")
+  protected final def expression: Rule1[Expression] = rule {
+    andExpression ~ (OR ~ andExpression ~> Or).*
+  }
+
+  protected final def expressionList: Rule1[Seq[Expression]] = rule {
+    O_PAREN ~ (expression * commaSep) ~ C_PAREN ~> ((e: Any) => e.asInstanceOf[Seq[Expression]])
+  }
 
   protected final def streamWindowOptions: Rule1[(Duration,
       Option[Duration])] = rule {
@@ -641,7 +857,7 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def toDouble(s: String): Double = {
-    toNumericLiteral(s).eval(EmptyRow) match {
+    handleException(toNumericLiteral(s), "double", s).eval(EmptyRow) match {
       case n: Number => n.doubleValue()
       case d: Decimal => d.toDouble
       case o => throw new ParseException(s"Cannot convert '$o' to double")
@@ -735,27 +951,23 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def inlineTable: Rule1[LogicalPlan] = rule {
-    VALUES ~ push(tokenize) ~ push(canTokenize) ~ DISABLE_TOKENIZE ~
-    (expression + commaSep) ~ alias.? ~ identifierList.? ~>
-        ((tokenized: Boolean, hasTokenized: Boolean,
-        valuesExpr: Seq[Expression], alias: Any, identifiers: Any) => {
-          canTokenize = hasTokenized
-          tokenize = tokenized
-          val rows = valuesExpr.map {
-            // e.g. values (1), (2), (3)
-            case struct: CreateNamedStruct => struct.valExprs
-            // e.g. values 1, 2, 3
-            case child => Seq(child)
-          }
-          val aliases = identifiers match {
-            case None => Seq.tabulate(rows.head.size)(i => s"col${i + 1}")
-            case Some(ids) => ids.asInstanceOf[Seq[String]]
-          }
-          alias.asInstanceOf[Option[String]] match {
-            case None => UnresolvedInlineTable(aliases, rows)
-            case Some(id) => internals.newSubqueryAlias(id, UnresolvedInlineTable(aliases, rows))
-          }
-        })
+    VALUES ~ CACHE_LITERAL_SKIP ~ (expression + commaSep) ~ alias.? ~ identifierList.? ~
+        CACHE_LITERAL_RESTORE ~> ((valuesExpr: Seq[Expression], alias: Any, identifiers: Any) => {
+      val rows = valuesExpr.map {
+        // e.g. values (1), (2), (3)
+        case struct: CreateNamedStruct => struct.valExprs
+        // e.g. values 1, 2, 3
+        case child => Seq(child)
+      }
+      val aliases = identifiers match {
+        case None => Seq.tabulate(rows.head.size)(i => s"col${i + 1}")
+        case Some(ids) => ids.asInstanceOf[Seq[String]]
+      }
+      alias.asInstanceOf[Option[String]] match {
+        case None => UnresolvedInlineTable(aliases, rows)
+        case Some(id) => internals.newSubqueryAlias(id, UnresolvedInlineTable(aliases, rows))
+      }
+    })
   }
 
   protected final def joinType: Rule1[JoinType] = rule {
@@ -809,8 +1021,8 @@ class SnappyParser(session: SnappySession)
           session.sessionState.conf.numShufflePartitions, l)))).? ~
     (WINDOW ~ ((identifier ~ AS ~ windowSpec ~>
         ((id: String, w: WindowSpec) => id -> w)) + commaSep)).? ~
-    ((LIMIT ~ (capture(ALL) | expressionNoTokens)) | fetchExpression).? ~> {
-      (o: Any, w: Any, e: Any) => (l: LogicalPlan) =>
+    ((LIMIT ~ (capture(ALL) | CACHE_LITERAL_SKIP ~ expression ~ CACHE_LITERAL_RESTORE)) |
+        fetchExpression).? ~> { (o: Any, w: Any, e: Any) => (l: LogicalPlan) =>
       val withOrder = o.asInstanceOf[Option[LogicalPlan => LogicalPlan]]
           .map(_ (l)).getOrElse(l)
       val window = w.asInstanceOf[Option[Seq[(String, WindowSpec)]]].map { ws =>
@@ -838,14 +1050,13 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def fetchExpression: Rule1[Expression] = rule {
-    FETCH ~ FIRST ~ push(tokenize) ~ TOKENIZE_END ~ integral.? ~ ((ROW | ROWS) ~ ONLY) ~>
-      ((tokenized: Boolean, f: Any) => {
-        tokenize = tokenized
-        f.asInstanceOf[Option[String]] match {
-          case None => Literal(1)
-          case Some(s) => Literal(s.toInt)
-        }
-      })
+    FETCH ~ FIRST ~ CACHE_LITERAL_SKIP ~ integral.? ~ CACHE_LITERAL_RESTORE ~
+        ((ROW | ROWS) ~ ONLY) ~> ((f: Any) => {
+      f.asInstanceOf[Option[String]] match {
+        case None => newLiteral(1, IntegerType)
+        case Some(s) => newLiteral(s.toInt, IntegerType)
+      }
+    })
   }
 
   protected final def distributeBy: Rule1[LogicalPlan => LogicalPlan] = rule {
@@ -956,171 +1167,8 @@ class SnappyParser(session: SnappySession)
     })
   }
 
-  protected final def keyWhenThenElse: Rule1[WhenElseType] = rule {
-    expression ~ (WHEN ~ expression ~ THEN ~ expression ~> ((w: Expression,
-        t: Expression) => (w, t))). + ~ (ELSE ~ expression).? ~ END ~>
-        ((key: Expression, altPart: Any, elsePart: Any) =>
-          (altPart.asInstanceOf[Seq[(Expression, Expression)]].map(
-            e => EqualTo(key, e._1) -> e._2), elsePart).asInstanceOf[WhenElseType])
-  }
-
-  protected final def whenThenElse: Rule1[WhenElseType] = rule {
-    (WHEN ~ expression ~ THEN ~ expression ~> ((w: Expression,
-        t: Expression) => (w, t))). + ~ (ELSE ~ expression).? ~ END ~>
-        ((altPart: Any, elsePart: Any) =>
-          (altPart, elsePart).asInstanceOf[WhenElseType])
-  }
-
-  protected final def foldableFunctionsExpressionHandler(exprs: IndexedSeq[Expression],
-      fnName: String): Seq[Expression] = Consts.FOLDABLE_FUNCTIONS.get(fnName) match {
-      case null => exprs
-      case args if args.length == 0 =>
-        // disable plan caching for these functions
-        session.planCaching = false
-        exprs
-      case args =>
-        exprs.indices.map(index => exprs(index).transformUp {
-          case l: TokenizedLiteral if (args(0) == -3 && !Ints.contains(args, index)) ||
-              (args(0) != -3 && (Ints.contains(args, index) ||
-              // all args          // all odd args
-              (args(0) == -10) || (args(0) == -1 && (index & 0x1) == 1) ||
-              // all even args
-              (args(0) == -2 && (index & 0x1) == 0))) =>
-            l match {
-              case pl: ParamLiteral  if pl.tokenized && _isPreparePhase =>
-                throw new ParseException(s"function $fnName cannot have " +
-                    s"parameterized argument at position ${index + 1}")
-              case _ =>
-            }
-            removeIfParamLiteralFromContext(l)
-            newLiteral(l.value, l.dataType)
-          case e => e
-        })
-    }
-
-  protected final def primary: Rule1[Expression] = rule {
-    literal |
-    questionMark |
-    '*' ~ ws ~> (() => UnresolvedStar(None)) |
-    CAST ~ O_PAREN ~ expression ~ AS ~ (dataType | intervalType) ~ C_PAREN ~> (Cast(_, _)) |
-    CASE ~ (
-        whenThenElse ~> (s => CaseWhen(s._1, s._2)) |
-        keyWhenThenElse ~> (s => CaseWhen(s._1, s._2))
-    ) |
-    EXISTS ~ O_PAREN ~ query ~ C_PAREN ~> (Exists(_)) |
-    CURRENT_DATE ~ (O_PAREN ~ C_PAREN).? ~> (() => CurrentDate()) |
-    CURRENT_TIMESTAMP ~ (O_PAREN ~ C_PAREN).? ~> CurrentTimestamp |
-    STRUCT ~ O_PAREN ~ namedExpressionSeq.? ~ C_PAREN ~> ((e: Any) => e match {
-      case None => CreateStruct(Nil)
-      case Some(s) => CreateStruct(s.asInstanceOf[Seq[Expression]])
-    }) |
-    FIRST ~ O_PAREN ~ expression ~ (
-        IGNORE ~ NULLS ~> ((e: Expression) =>
-          First(e, Literal(true, BooleanType)).toAggregateExpression()) |
-        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
-          Consts.FIRST.lower, e +: args.asInstanceOf[Seq[Expression]], isDistinct = false))
-    ) ~ C_PAREN |
-    LAST ~ O_PAREN ~ expression ~ (
-        IGNORE ~ NULLS ~> ((e: Expression) =>
-          Last(e, Literal(true, BooleanType)).toAggregateExpression()) |
-        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
-          Consts.LAST.lower, e +: args.asInstanceOf[Seq[Expression]], isDistinct = false))
-    ) ~ C_PAREN |
-    POSITION ~ O_PAREN ~ expression ~ (
-        IN ~ expression ~> ((sub: Expression, str: Expression) => new StringLocate(sub, str)) |
-        (commaSep ~ expression). + ~> ((sub: Expression, args: Any) => UnresolvedFunction(
-          Consts.POSITION.lower, sub +: args.asInstanceOf[Seq[Expression]], isDistinct = false))
-    ) ~ C_PAREN |
-    TRIM ~ O_PAREN ~ (
-        (BOTH ~ push(0) | LEADING ~ push(1) | TRAILING ~ push(2)) ~ expression ~
-            FROM ~ expression ~> { (flag: Int, trim: Expression, src: Expression) =>
-          val funcName = flag match {
-            case 0 => Consts.TRIM.lower
-            case 1 => "ltrim"
-            case 2 => "rtrim"
-          }
-          UnresolvedFunction(funcName, trim :: src :: Nil, isDistinct = false)
-        } |
-        (expression + commaSep) ~> ((args: Seq[Expression]) =>
-          UnresolvedFunction(Consts.TRIM.lower, args, isDistinct = false))
-    ) ~ C_PAREN |
-    identifierWithKind ~ (
-      "->" ~ ws ~ expression ~> ((id: String, e: Expression) =>
-        internals.newLambdaFunction(e, UnresolvedAttribute(id :: Nil) :: Nil)) |
-      ('.' ~ ws ~ identifierWithKind).* ~> { (id: String, ids: Any) =>
-        val idSeq = ids.asInstanceOf[Seq[String]]
-        if (idSeq.isEmpty) id :: Nil else (id +: idSeq).toIndexedSeq
-      } ~ (
-        '.' ~ ws ~ '*' ~ ws ~> ((ids: Seq[String]) => UnresolvedStar(Some(ids))) |
-        O_PAREN ~ setQuantifier ~ (expression * commaSep) ~ C_PAREN ~ (OVER ~ windowSpec).? ~> {
-          (ids: Seq[String], a: Option[Boolean], args: Any, w: Any) =>
-            val id = ids.head
-            val fnName = ids.length match {
-              case 1 => new FunctionIdentifier(id)
-              case 2 => new FunctionIdentifier(ids(1), Some(id))
-              case _ =>
-                throw new ParseException(s"Unsupported function name '${ids.mkString(".")}'")
-            }
-            val allExprs = args.asInstanceOf[Seq[Expression]].toIndexedSeq
-            val exprs = foldableFunctionsExpressionHandler(allExprs, id)
-            val function = if (!a.contains(false)) {
-              // convert COUNT(*) to COUNT(1)
-              if (fnName.database.isEmpty && fnName.funcName.equalsIgnoreCase("count") &&
-                  exprs.length == 1 && exprs.head == UnresolvedStar(None)) {
-                UnresolvedFunction(fnName, newLiteral(1, IntegerType) :: Nil, isDistinct = false)
-              } else UnresolvedFunction(fnName, exprs, isDistinct = false)
-            } else {
-              UnresolvedFunction(fnName, exprs, isDistinct = true)
-            }
-            w.asInstanceOf[Option[WindowSpec]] match {
-              case None => function
-              case Some(spec: WindowSpecDefinition) => WindowExpression(function, spec)
-              case Some(ref: WindowSpecReference) => UnresolvedWindowExpression(function, ref)
-            }
-        } |
-        // noinspection ScalaUnnecessaryParentheses
-        MATCH ~> { (ids: Seq[String]) =>
-          val idLen = ids.length
-          if (isQuoted && idLen <= 2 && canApplyRegex) {
-            if (idLen == 1) internals.newUnresolvedRegex(ids.head, None, caseSensitive)
-            else internals.newUnresolvedRegex(ids(1), Some(ids.head), caseSensitive)
-          } else UnresolvedAttribute(ids)
-        }
-      )
-    ) |
-    '{' ~ ws ~ FN ~ functionIdentifier ~ expressionList ~
-        '}' ~ ws ~> { (fn: FunctionIdentifier, e: Seq[Expression]) =>
-        val exprs = foldableFunctionsExpressionHandler(e.toIndexedSeq, fn.funcName)
-        fn match {
-          case f if f.funcName.equalsIgnoreCase("timestampadd") =>
-            assert(exprs.length == 3)
-            assert(exprs.head.isInstanceOf[UnresolvedAttribute] &&
-                exprs.head.asInstanceOf[UnresolvedAttribute].name.equalsIgnoreCase("sql_tsi_day"))
-            DateAdd(exprs(2), exprs(1))
-          case f => UnresolvedFunction(f, exprs, isDistinct = false)
-        }
-    } |
-    O_PAREN ~ (
-        (namedExpression + commaSep) ~ C_PAREN ~ (
-            "->" ~ expression ~> ((args: Seq[Expression], e: Expression) =>
-              internals.newLambdaFunction(e, args)) |
-            MATCH ~> ((exprs: Seq[Expression]) =>
-              if (exprs.length == 1 && !exprs.head.isInstanceOf[NamedExpression]) exprs.head
-              else CreateStruct(exprs))
-        ) |
-        // noinspection ScalaUnnecessaryParentheses
-        query ~ C_PAREN ~> { (plan: LogicalPlan) =>
-          session.planCaching = false // never cache scalar subquery plans
-          ScalarSubquery(plan)
-        }
-    ) |
-    signedPrimary |
-    '~' ~ ws ~ expression ~> BitwiseNot
-  }
-
-  protected final def signedPrimary: Rule1[Expression] = rule {
-    capture(plusOrMinus) ~ ws ~ primary ~> ((s: String, e: Expression) =>
-      if (s.charAt(0) == '-') UnaryMinus(e) else e)
+  protected final def whenClause: Rule1[(Expression, Expression)] = rule {
+    WHEN ~ expression ~ THEN ~ expression ~> ((w: Expression, t: Expression) => (w, t))
   }
 
   protected final def named(e: Expression): NamedExpression = e match {
@@ -1135,9 +1183,9 @@ class SnappyParser(session: SnappySession)
 
   protected def select: Rule1[LogicalPlan] = rule {
     SELECT ~ (DISTINCT ~ push(true)).? ~
-    SELECT_BEGIN ~ namedExpressionSeq ~ SELECT_END ~
+    PROJECTION_BEGIN ~ namedExpressionSeq ~ PROJECTION_END ~
     (FROM ~ relations).? ~
-    TOKENIZE_BEGIN ~ (WHERE ~ expression).? ~
+    CACHE_LITERAL_BEGIN ~ (WHERE ~ expression).? ~
     groupBy.? ~
     (HAVING ~ expression).? ~
     queryOrganization ~ SELECT_STMT_END ~> { (d: Any, p: Seq[Expression], f: Any, w: Any,
@@ -1190,15 +1238,29 @@ class SnappyParser(session: SnappySession)
     (O_PAREN ~ queryNoWith ~ C_PAREN)
   }
 
-  protected final def queryTerm: Rule1[LogicalPlan] = rule {
+  /**
+   * In Spark 2.3 onwards, INTERSECT has a precedence over other set operators unless
+   * [[legacySetOpsPrecedence]] is set (in which case all have the same precedence).
+   * This is handled using the intermediate rule below which will then be used in the
+   * main rule of [[queryTerm]] ensuring that all INTERSECT operators are resolved first.
+   */
+  protected final def queryTermIntersect: Rule1[LogicalPlan] = rule {
     queryPrimary.named("select") ~ (
-        UNION ~ setQuantifier ~ queryPrimary.named("select") ~>
+        test(!legacySetOpsPrecedence) ~ INTERSECT ~ setQuantifier ~ queryPrimary.named("select") ~>
+            ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
+              internals.newIntersect(q1, q2, quantifier.contains(true)))
+    ).*
+  }
+
+  protected final def queryTerm: Rule1[LogicalPlan] = rule {
+    queryTermIntersect.named("select") ~ (
+        UNION ~ setQuantifier ~ queryTermIntersect.named("select") ~>
             ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
               if (quantifier.contains(true)) Union(q1, q2) else Distinct(Union(q1, q2))) |
-        INTERSECT ~ setQuantifier ~ queryPrimary.named("select") ~>
-            ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
-              internals.newIntersect(q1, q2, quantifier.contains(true))) |
-        (EXCEPT | MINUS) ~ setQuantifier ~ queryPrimary.named("select") ~>
+        test(legacySetOpsPrecedence) ~ INTERSECT ~ setQuantifier ~
+            queryTermIntersect.named("select") ~> ((q1: LogicalPlan, quantifier: Option[Boolean],
+            q2: LogicalPlan) => internals.newIntersect(q1, q2, quantifier.contains(true))) |
+        (EXCEPT | MINUS) ~ setQuantifier ~ queryTermIntersect.named("select") ~>
             ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
               internals.newExcept(q1, q2, quantifier.contains(true)))
     ).*
@@ -1236,10 +1298,9 @@ class SnappyParser(session: SnappySession)
 
   protected final def pivot: Rule1[LogicalPlan => LogicalPlan] = rule {
     PIVOT ~ O_PAREN ~ namedExpressionSeq ~ FOR ~ (identifierList | identifier) ~ IN ~ O_PAREN ~
-        push(canTokenize) ~ DISABLE_TOKENIZE ~ namedExpressionSeq ~ C_PAREN ~ C_PAREN ~>
-        ((aggregates: Seq[Expression], ids: Any, hasTokenized: Boolean,
+        CACHE_LITERAL_SKIP ~ namedExpressionSeq ~ CACHE_LITERAL_RESTORE ~ C_PAREN ~ C_PAREN ~>
+        ((aggregates: Seq[Expression], ids: Any,
             values: Seq[Expression]) => (child: LogicalPlan) => {
-          canTokenize = hasTokenized
           val pivotColumn = ids match {
             case id: String => UnresolvedAttribute.quoted(id)
             case _ => CreateStruct(ids.asInstanceOf[Seq[String]].map(UnresolvedAttribute.quoted))
@@ -1249,8 +1310,8 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def insert: Rule1[LogicalPlan] = rule {
-    INSERT ~ ((OVERWRITE ~ push(true) ~ TABLE) | (INTO ~ push(false) ~ TABLE.?)) ~
-    baseRelation ~ partitionSpec ~ ifNotExists ~ queryTerm ~> ((overwrite: Boolean,
+    INSERT ~ (OVERWRITE ~ push(true) | INTO ~ push(false)) ~ TABLE.? ~
+        baseRelation ~ partitionSpec ~ ifNotExists ~ queryTerm ~> ((overwrite: Boolean,
         r: LogicalPlan, spec: Map[String, Option[String]], exists: Boolean, q: LogicalPlan) =>
       internals.newInsertIntoTable(r, spec, q, overwrite, exists)) |
     INSERT ~ OVERWRITE ~ LOCAL.? ~ DIRECTORY ~ ANY. + ~> (() =>
@@ -1262,10 +1323,10 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def update: Rule1[LogicalPlan] = rule {
-    UPDATE ~ tableIdentifier ~ SET ~ TOKENIZE_BEGIN ~ (((identifier + ('.' ~ ws)) ~
+    UPDATE ~ tableIdentifier ~ SET ~ CACHE_LITERAL_BEGIN ~ (((identifier + ('.' ~ ws)) ~
         '=' ~ ws ~ expression ~> ((cols: Seq[String], e: Expression) =>
-      UnresolvedAttribute(cols) -> e)) + commaSep) ~ TOKENIZE_END ~
-        (FROM ~ relations).? ~ (WHERE ~ TOKENIZE_BEGIN ~ expression ~ TOKENIZE_END).? ~>
+      UnresolvedAttribute(cols) -> e)) + commaSep) ~ CACHE_LITERAL_END ~
+        (FROM ~ relations).? ~ (WHERE ~ CACHE_LITERAL_BEGIN ~ expression ~ CACHE_LITERAL_END).? ~>
         ((t: TableIdentifier, updateExprs: Seq[(UnresolvedAttribute, Expression)],
             relations: Any, whereExpr: Any) => {
           val table = session.sessionCatalog.resolveRelationWithAlias(t)
@@ -1284,7 +1345,7 @@ class SnappyParser(session: SnappySession)
 
   protected final def delete: Rule1[LogicalPlan] = rule {
     DELETE ~ FROM ~ baseRelation ~ (
-        WHERE ~ TOKENIZE_BEGIN ~ expression ~ TOKENIZE_END ~>
+        WHERE ~ CACHE_LITERAL_BEGIN ~ expression ~ CACHE_LITERAL_END ~>
             ((base: LogicalPlan, expr: Expression) => Delete(base, Filter(expr, base), Nil)) |
         query ~> DeleteFromTable |
         MATCH ~> ((base: LogicalPlan) => Delete(base, base, Nil))
@@ -1340,7 +1401,7 @@ class SnappyParser(session: SnappySession)
     SHOW ~ strictIdentifier.? ~ FUNCTIONS ~ (LIKE.? ~
         (functionIdentifier | stringLiteral)).? ~> { (id: Any, nameOrPat: Any) =>
       val (user, system) = id.asInstanceOf[Option[String]]
-          .map(_.toLowerCase) match {
+          .map(Utils.toLowerCase) match {
         case None | Some("all") => (true, true)
         case Some("system") => (false, true)
         case Some("user") => (true, false)
@@ -1379,7 +1440,7 @@ class SnappyParser(session: SnappySession)
         ((table: TableIdentifier, ids: Any) => ids.asInstanceOf[Option[Any]] match {
           case None => AnalyzeTableCommand(table, noscan = false)
           case Some(id: String) =>
-            if (id.toLowerCase != "noscan") {
+            if (Utils.toLowerCase(id) != "noscan") {
               throw new ParseException(s"Expected `NOSCAN` instead of `$id`")
             }
             AnalyzeTableCommand(table)
@@ -1401,67 +1462,84 @@ class SnappyParser(session: SnappySession)
       })
   }
 
-  private[this] final var tokenize = false
+  private[this] final var cacheLiteral = false
+  private[this] final var canCacheLiteral = true
+  private[this] final val cacheFlags = new BooleanArrayStack()
 
-  private[this] final var canTokenize = false
-
-  protected final def TOKENIZE_BEGIN: Rule0 = rule {
-    MATCH ~> (() => tokenize = canTokenize)
+  protected final def CACHE_LITERAL_BEGIN: Rule0 = rule {
+    MATCH ~> (() => cacheLiteral = canCacheLiteral)
   }
 
-  protected final def TOKENIZE_END: Rule0 = rule {
-    MATCH ~> (() => tokenize = false)
+  protected final def CACHE_LITERAL_END: Rule0 = rule {
+    MATCH ~> (() => cacheLiteral = false)
   }
 
-  protected final def SELECT_BEGIN: Rule0 = rule {
+  protected final def CACHE_LITERAL_SKIP: Rule0 = rule {
     MATCH ~> { () =>
-      _selectContext += 1
-      _inSelect = true
-      tokenize = canTokenize
+      cacheFlags.push(canCacheLiteral)
+      cacheFlags.push(cacheLiteral)
+      cacheLiteral = false
+      canCacheLiteral = false
     }
   }
 
-  protected final def SELECT_END: Rule0 = rule {
+  protected final def CACHE_LITERAL_RESTORE: Rule0 = rule {
     MATCH ~> { () =>
-      _inSelect = false
-      tokenize = false
+      cacheLiteral = cacheFlags.pop()
+      canCacheLiteral = cacheFlags.pop()
+    }
+  }
+
+  protected final def PROJECTION_BEGIN: Rule0 = rule {
+    MATCH ~> { () =>
+      _selectContext += 1
+      _inProjection = true
+      cacheLiteral = canCacheLiteral
+    }
+  }
+
+  protected final def PROJECTION_END: Rule0 = rule {
+    MATCH ~> { () =>
+      _inProjection = false
+      cacheLiteral = false
     }
   }
 
   protected final def SELECT_STMT_END: Rule0 = rule {
     MATCH ~> { () =>
       _selectContext -= 1
-      _inSelect = _selectContext > 0
-      tokenize = false
+      _inProjection = _selectContext > 0
+      cacheLiteral = canCacheLiteral && _inProjection
     }
   }
 
-  protected final def ENABLE_TOKENIZE: Rule0 = rule {
-    MATCH ~> (() => canTokenize = true)
-  }
-
-  protected final def DISABLE_TOKENIZE: Rule0 = rule {
-    MATCH ~> (() => canTokenize = false)
-  }
-
   override protected def start: Rule1[LogicalPlan] = rule {
-    (ENABLE_TOKENIZE ~ (query.named("select") | insert | put | update | delete)) |
-        (DISABLE_TOKENIZE ~ (dmlOperation | ddl | show | set | reset | cache |
-            uncache | deployPackages | explain | analyze | delegateToSpark))
+    query.named("select") | insert | put | update | delete | dmlOperation | ddl | show |
+    set | reset | cache | uncache | deployPackages | explain | analyze | delegateToSpark
+  }
+
+  private final def initConf(): Unit = {
+    caseSensitive = session.sessionState.conf.caseSensitiveAnalysis
+    escapedStringLiterals = session.conf.get(
+      "spark.sql.parser.escapedStringLiterals", "false").equalsIgnoreCase("true")
+    quotedRegexColumnNames = session.conf.get(
+      "spark.sql.parser.quotedRegexColumnNames", "false").equalsIgnoreCase("true")
+    legacySetOpsPrecedence = session.conf.get(
+      "spark.sql.legacy.setopsPrecedence.enabled", "false").equalsIgnoreCase("true")
   }
 
   final def parse[T](sqlText: String, parseRule: => Try[T],
       clearExecutionData: Boolean = false): T = session.synchronized {
     session.clearQueryData()
     if (clearExecutionData) session.snappySessionState.clearExecutionData()
-    caseSensitive = session.sessionState.conf.caseSensitiveAnalysis
+    initConf()
     parseSQL(sqlText, parseRule)
   }
 
   /** Parse SQL without any other handling like query hints */
   def parseSQLOnly[T](sqlText: String, parseRule: => Try[T]): T = {
     this.input = sqlText
-    caseSensitive = session.sessionState.conf.caseSensitiveAnalysis
+    initConf()
     parseRule match {
       case Success(p) => p
       case Failure(e: ParseError) =>
