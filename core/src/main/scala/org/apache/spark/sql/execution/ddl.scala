@@ -140,8 +140,11 @@ case class TruncateManagedTableCommand(ifExists: Boolean,
       catalog.resolveRelation(table) match {
         case lr: LogicalRelation if lr.relation.isInstanceOf[DestroyRelation] =>
           lr.relation.asInstanceOf[DestroyRelation].truncate()
-        case plan => throw new AnalysisException(
-          s"Table '$table' must be a DestroyRelation for truncate. Found plan: $plan")
+        case plan => internals.newTruncateTableCommand(table) match {
+          case Some(cmd) => cmd.run(session)
+          case None => throw new AnalysisException(
+            s"Table '$table' must be a DestroyRelation for truncate. Found plan: $plan")
+        }
       }
       internals.uncacheQuery(session, session.table(table).logicalPlan,
         cascade = true, blocking = true)

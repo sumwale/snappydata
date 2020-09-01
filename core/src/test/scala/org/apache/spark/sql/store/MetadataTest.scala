@@ -421,7 +421,7 @@ object MetadataTest extends Assertions {
     assert(rs.length === filtered.length)
     assert(rs.sortBy(_.getString(0)) === filtered.map(Row(_)))
 
-    executeSQL("set snappydata.sql.hiveCompatibility=default")
+    executeSQL("set snappydata.sql.hiveCompatibility=snappy")
 
     // system schemas other than SYS should not be visible
     try {
@@ -589,7 +589,7 @@ object MetadataTest extends Assertions {
     assert(rs.sortBy(_.getString(0)) === Array(
       Row("columntable2"), Row("rowtable1")))
 
-    executeSQL("set snappydata.sql.hiveCompatibility=default")
+    executeSQL("set snappydata.sql.hiveCompatibility=snappy")
 
     // ----- check DESCRIBE and SHOW COLUMNS for user tables -----
 
@@ -778,7 +778,7 @@ object MetadataTest extends Assertions {
     assert(rs.length === 1)
     assert(rs(0) === Row("rowtable2"))
 
-    executeSQL("set snappydata.sql.hiveCompatibility=default")
+    executeSQL("set snappydata.sql.hiveCompatibility=snappy")
 
     // ----- check DESCRIBE and SHOW COLUMNS for user tables -----
 

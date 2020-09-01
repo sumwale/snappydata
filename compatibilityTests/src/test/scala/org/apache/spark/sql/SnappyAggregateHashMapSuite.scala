@@ -20,3 +20,5 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 
 class SnappyAggregateHashMapSuite extends SingleLevelAggregateHashMapSuite
     with SharedSnappySessionContext with SnappySparkTestUtil
+
+// TwoLevel and Vectorized variants are identical for SnappyHashAggregateExec

@@ -95,7 +95,13 @@ case class SnappyHashAggregateExec(
   override def nodeName: String =
     if (useByteBufferMapBasedAggregation) "BufferMapHashAggregate" else "SnappyHashAggregate"
 
+  // The result rows come from the aggregate buffer, or a single row (no grouping keys), so this
+  // operator doesn't need to copy its result even if its child does.
   override def needCopyResult: Boolean = false
+
+  // Aggregate operator always consumes all the input rows before outputting any result, so we
+  // don't need a stop check before aggregating.
+  override def needStopCheck: Boolean = false
 
   @transient def resultExpressions: Seq[NamedExpression] = __resultExpressions
 

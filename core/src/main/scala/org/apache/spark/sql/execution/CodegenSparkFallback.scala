@@ -111,7 +111,7 @@ abstract case class CodegenSparkFallback(var child: SparkPlan,
                 case t: Throwable if CachedDataFrame.isConnectorCatalogStaleException(t, session) =>
                   session.externalCatalog.invalidateAll()
                   SnappySession.clearAllCache()
-                  throw CachedDataFrame.catalogStaleFailure(t, session)
+                  throw CachedDataFrame.catalogStaleFailure(t)
               } finally {
                 session.snappySessionState.disableStoreOptimizations = false
               }
@@ -131,7 +131,7 @@ abstract case class CodegenSparkFallback(var child: SparkPlan,
       case p if SnappySession.isCommandExec(p) => true
       case _ => false
     }
-    if (action.isDefined) throw CachedDataFrame.catalogStaleFailure(t, session)
+    if (action.isDefined) throw CachedDataFrame.catalogStaleFailure(t)
 
     execution match {
       case Some(exec) =>

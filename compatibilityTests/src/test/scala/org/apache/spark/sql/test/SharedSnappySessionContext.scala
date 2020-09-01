@@ -41,6 +41,11 @@ trait SharedSnappySessionContext extends SharedSQLContext {
     val session = new TestSnappySession(sparkConf
         .set("spark.hadoop.fs.file.impl", classOf[DebugFilesystem].getName)
         .set("spark.sql.codegen.fallback", codegenFallback.toString)
+        .set("snappydata.sql.hiveCompatibility", "spark")
+        // use a session cache which is disabled by default in SnappyData (since
+        //   a cache is already present in ExternalCatalog implementations that handles
+        //   invalidation properly for the smart connector case)
+        .set("spark.sql.filesourceTableRelationCacheSize", "100")
         .set("snappydata.sql.planCaching.", random.nextBoolean().toString)
         .set("snappydata.sql.disableCodegenFallback", "true")
         .set("snappydata.sql.useOptimizedHashAggregateForSingleKey", "true"))

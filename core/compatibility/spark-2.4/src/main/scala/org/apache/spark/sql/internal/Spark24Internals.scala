@@ -22,7 +22,7 @@ import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
-import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, TypeCoercion, UnresolvedAttribute}
+import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, TypeCoercion, UnresolvedAttribute, UnresolvedHaving}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.codegen._
@@ -115,7 +115,7 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
   // scalastyle:on
 
   override def newSubqueryAlias(alias: String, child: LogicalPlan,
-      view: Option[TableIdentifier]): SubqueryAlias = view match {
+      view: Option[TableIdentifier]): LogicalPlan = view match {
     case Some(v@TableIdentifier(table, schemaOpt)) =>
       if (!alias.equalsIgnoreCase(table)) {
         throw new AnalysisException(s"Conflicting alias and view: alias=$alias, view=$v")
@@ -178,7 +178,7 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
   }
 
   override def newSnappySessionState(snappySession: SnappySession): SnappySessionState = {
-    new SnappySessionStateBuilder24(snappySession).build()
+    new SnappySessionStateBuilder24(snappySession, snappySession.cloneSessionState).build()
   }
 
   override def newCacheManager(): CacheManager = new SnappyCacheManager24
@@ -261,6 +261,10 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
 
   override def newExcept(left: LogicalPlan, right: LogicalPlan, isAll: Boolean): Except = {
     Except(left, right, isAll)
+  }
+
+  override def newUnresolvedHaving(predicate: Expression, child: LogicalPlan): LogicalPlan = {
+    UnresolvedHaving(predicate, child)
   }
 
   override def cachedColumnBuffers(relation: InMemoryRelation): RDD[_] = {

@@ -16,7 +16,6 @@
  */
 
 apply plugin: 'java'
-apply plugin: 'scala'
 
 compileJava.options.encoding = 'UTF-8'
 
@@ -30,14 +29,9 @@ dependencies {
 
 archivesBaseName = 'snappydata-launcher'
 
-task packageScalaDocs(type: Jar, dependsOn: scaladoc) {
-  classifier = 'javadoc'
-  from scaladoc
-}
-
 if (rootProject.hasProperty('enablePublish')) {
   artifacts {
-    archives packageScalaDocs, packageSources
+    archives packageSources
   }
 }
 

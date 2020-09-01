@@ -90,7 +90,7 @@ class SnappyParser(session: SnappySession)
     _preparedParamsTypesInfo = Option(info)
   }
 
-  private def toDecimalLiteral(s: String, checkExactNumeric: Boolean): Expression = {
+  private def toDecimalLiteral(s: String, checkExactNumeric: Boolean): TokenizedLiteral = {
     val decimal = BigDecimal(s)
     if (checkExactNumeric) {
       try {
@@ -119,7 +119,7 @@ class SnappyParser(session: SnappySession)
     }
   }
 
-  private def toNumericLiteral(s: String): Expression = {
+  private def toNumericLiteral(s: String): TokenizedLiteral = {
     // quick pass through the string to check for floats
     var noDecimalPoint = true
     var index = 0
@@ -132,38 +132,21 @@ class SnappyParser(session: SnappySession)
           s.charAt(len - 2) match {
             case 'B' | 'b' => return toDecimalLiteral(s.substring(0, len - 2),
               checkExactNumeric = false)
-            case c if Character.isDigit(c) => return newCachedLiteral(
+            case _ => return newCachedLiteral(
               java.lang.Double.parseDouble(s.substring(0, len - 1)), DoubleType)
-            case _ => throw new ParseException(s"Found non numeric token $s")
           }
         } else {
           return newCachedLiteral(
             java.lang.Double.parseDouble(s.substring(0, len - 1)), DoubleType)
         }
-      case 'F' | 'f' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newCachedLiteral(
-          java.lang.Float.parseFloat(s.substring(0, len - 1)), FloatType)
-      } else {
-        throw new ParseException(s"Found non numeric token $s")
-      }
-      case 'L' | 'l' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newCachedLiteral(
-          java.lang.Long.parseLong(s.substring(0, len - 1)), LongType)
-      } else {
-        throw new ParseException(s"Found non numeric token $s")
-      }
-      case 'S' | 's' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newCachedLiteral(
-          java.lang.Short.parseShort(s.substring(0, len - 1)), ShortType)
-      } else {
-        throw new ParseException(s"Found non numeric token $s")
-      }
-      case 'B' | 'b' | 'Y' | 'y' => if (Character.isDigit(s.charAt(len - 2))) {
-        return newCachedLiteral(
-          java.lang.Byte.parseByte(s.substring(0, len - 1)), ByteType)
-      } else {
-        throw new ParseException(s"Found non numeric token $s")
-      }
+      case 'F' | 'f' => return newCachedLiteral(
+        java.lang.Float.parseFloat(s.substring(0, len - 1)), FloatType)
+      case 'L' | 'l' => return newCachedLiteral(
+        java.lang.Long.parseLong(s.substring(0, len - 1)), LongType)
+      case 'S' | 's' => return newCachedLiteral(
+        java.lang.Short.parseShort(s.substring(0, len - 1)), ShortType)
+      case 'B' | 'b' | 'Y' | 'y' => return newCachedLiteral(
+        java.lang.Byte.parseByte(s.substring(0, len - 1)), ByteType)
       case _ =>
     }
     while (index < len) {
@@ -202,7 +185,7 @@ class SnappyParser(session: SnappySession)
     val indexHint = queryHints.remove(QueryHint.Index.toString)
     if (indexHint ne null) {
       val table = optAlias match {
-        case Some((alias, _)) => alias
+        case Some(a) => a._1
         case _ => tableIdent.unquotedString
       }
       queryHints.put(QueryHint.Index.toString + table, indexHint)
@@ -238,12 +221,15 @@ class SnappyParser(session: SnappySession)
     }
   }
 
-  protected final def literal: Rule1[Expression] = rule {
+  protected final def stringLiterals: Rule1[String] = rule {
     stringLiteral ~ (
-        stringLiteral. + ~> ((s: String, ss: Seq[String]) =>
-          newCachedLiteral(UTF8String.fromString((s +: ss).mkString), StringType)) |
-        MATCH ~> ((s: String) => newCachedLiteral(UTF8String.fromString(s), StringType))
-    ) |
+        stringLiteral. + ~> ((s: String, ss: Seq[String]) => (s +: ss).mkString) |
+        MATCH.asInstanceOf[Rule[String::HNil, String::HNil]]
+    )
+  }
+
+  protected final def literal: Rule1[Expression] = rule {
+    stringLiterals ~> ((s: String) => newCachedLiteral(UTF8String.fromString(s), StringType)) |
     numericLiteral ~> ((s: String) => handleException(toNumericLiteral(s), "number", s)) |
     booleanLiteral ~> ((b: Boolean) => newCachedLiteral(b, BooleanType)) |
     NULL ~> (() => newLiteral(null, NullType)) | // no ParamLiterals for nulls
@@ -287,12 +273,12 @@ class SnappyParser(session: SnappySession)
     else new TokenLiteral(v, dataType)
   }
 
-  protected final def newCachedLiteral(v: Any, dataType: DataType): Expression = {
+  protected final def newCachedLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
     if (cacheLiteral) addCachedLiteral(v, dataType)
     else new TokenLiteral(v, dataType)
   }
 
-  protected final def newLiteral(v: Any, dataType: DataType): Expression = {
+  protected final def newLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
     new TokenLiteral(v, dataType)
   }
 
@@ -379,17 +365,13 @@ class SnappyParser(session: SnappySession)
     ) ~ ws
   }
 
-  final def alias: Rule1[String] = rule {
-    AS ~ identifierExt | strictIdentifier
-  }
-
   final def namedExpression: Rule1[Expression] = rule {
-    expression ~ alias.? ~> ((e: Expression, a: Any) => {
-      a.asInstanceOf[Option[String]] match {
-        case None => e
-        case Some(n) => Alias(e, n)()
-      }
-    })
+    expression ~ (AS ~ (identifierExt2 | identifierList) | (strictIdentifier | identifierList)).? ~>
+        ((e: Expression, a: Any) => a match {
+          case None => e
+          case Some(name) if name.isInstanceOf[String] => Alias(e, name.asInstanceOf[String])()
+          case Some(names) => MultiAlias(e, names.asInstanceOf[Seq[String]])
+        })
   }
 
   final def namedExpressionSeq: Rule1[Seq[Expression]] = rule {
@@ -580,7 +562,7 @@ class SnappyParser(session: SnappySession)
     ) |
     O_PAREN ~ (
         (namedExpression + commaSep) ~ C_PAREN ~ (
-            "->" ~ expression ~> ((args: Seq[Expression], e: Expression) =>
+            "->" ~ ws ~ expression ~> ((args: Seq[Expression], e: Expression) =>
               internals.newLambdaFunction(e, args)) |
             MATCH ~> ((exprs: Seq[Expression]) =>
               if (exprs.length == 1) exprs.head else CreateStruct(exprs))
@@ -750,9 +732,10 @@ class SnappyParser(session: SnappySession)
           case _ => Like(e1, e2)
         }) |
     IN ~ O_PAREN ~ (
+        // query should be before expression else '(' query ')' gets resolved as a scalar subquery
+        query ~> ((e1: Expression, plan: LogicalPlan) => internals.newInSubquery(e1, plan)) |
         (expression + commaSep) ~> ((e: Expression, es: Any) =>
-          In(e, es.asInstanceOf[Seq[Expression]])) |
-        query ~> ((e1: Expression, plan: LogicalPlan) => internals.newInSubquery(e1, plan))
+          In(e, es.asInstanceOf[Seq[Expression]]))
     ) ~ C_PAREN |
     BETWEEN ~ valueExpression ~ AND ~ valueExpression ~>
         ((e: Expression, el: Expression, eu: Expression) =>
@@ -768,7 +751,12 @@ class SnappyParser(session: SnappySession)
 
   private final def booleanExpression: Rule1[Expression] = rule {
     NOT ~ booleanExpression ~> Not |
-    EXISTS ~ O_PAREN ~ query ~ C_PAREN ~> (Exists(_)) |
+    // exists is also a function
+    EXISTS ~ O_PAREN ~ (
+        query ~> (Exists(_)) |
+        (expression + commaSep) ~> ((args: Seq[Expression]) =>
+          UnresolvedFunction(Consts.EXISTS.lower, args, isDistinct = false))
+    ) ~ C_PAREN |
     valueExpression ~ (
         predicate |
         NOT ~ predicate ~> Not |
@@ -874,100 +862,107 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def tableAlias: Rule1[(String, Seq[String])] = rule {
-    (AS ~ identifier | strictIdentifier) ~ identifierList.? ~>
+    (AS ~ identifierExt2 | strictIdentifier) ~ identifierList.? ~>
         ((alias: String, columnAliases: Any) => columnAliases match {
           case None => (alias, Nil)
           case Some(aliases) => (alias, aliases.asInstanceOf[Seq[String]])
         })
   }
 
-  protected final def handleSubqueryAlias(aliasSpec: Option[(String, Seq[String])],
-      child: LogicalPlan): LogicalPlan = aliasSpec match {
-    case None => child
-    case Some((alias, columnAliases)) =>
-      internals.newUnresolvedColumnAliases(columnAliases, internals.newSubqueryAlias(alias, child))
-  }
-
-  protected final def baseRelation: Rule1[LogicalPlan] = rule {
-    relationLeaf ~ sample.? ~ tableAlias.? ~> { (rel: LogicalPlan, s: Any, a: Any) =>
-      val optAlias = a.asInstanceOf[Option[(String, Seq[String])]]
-      val plan = rel match {
-        case u: UnresolvedRelation =>
-          val tableIdent = u.tableIdentifier
-          updatePerTableQueryHint(tableIdent, optAlias)
-          if (optAlias.isEmpty) u
-          else {
-            internals.newUnresolvedColumnAliases(optAlias.get._2,
-                internals.newUnresolvedRelation(tableIdent, Some(optAlias.get._1)))
-          }
-        case u: UnresolvedTableValuedFunction =>
-          assertNoQueryHint(rel, optAlias)
-          if (optAlias.isEmpty) u
-          else {
-            internals.newSubqueryAlias(optAlias.get._1,
-              internals.newUnresolvedTableValuedFunction(u.functionName,
-                u.functionArgs, optAlias.get._2))
-          }
-        case w@WindowLogicalPlan(_, _, u: UnresolvedRelation, _) =>
-          val tableIdent = u.tableIdentifier
-          updatePerTableQueryHint(tableIdent, optAlias)
-          if (optAlias.isDefined) {
-            w.child = internals.newUnresolvedColumnAliases(optAlias.get._2,
-                internals.newUnresolvedRelation(tableIdent, Some(optAlias.get._1)))
-          }
-          w
-        case w@WindowLogicalPlan(_, _, child, _) =>
-          assertNoQueryHint(rel, optAlias)
-          if (optAlias.isDefined) w.child = handleSubqueryAlias(optAlias, child)
-          w
-        case _ =>
-          assertNoQueryHint(rel, optAlias)
-          if (optAlias.isEmpty) rel else handleSubqueryAlias(optAlias, rel)
-      }
-      s.asInstanceOf[Option[LogicalPlan => LogicalPlan]] match {
-        case None => plan
-        case Some(cs) => cs(plan)
-      }
-    }
-  }
-
-  protected final def relationLeaf: Rule1[LogicalPlan] = rule {
+  /**
+   * Table name optionally followed by column names in parentheses that can appear in
+   * queries or INSERT/PUT. In queries when column names are present, then it is interpreted
+   * as a SQL function that takes those arguments and resolves to a set of rows
+   * e.g. RANGE(...) function. In DML operations it represents a subset of columns of the
+   * table on which operation will be performed with remaining columns of the table
+   * using null/default values.
+   */
+  protected final def baseTable: Rule1[LogicalPlan] = rule {
     tableIdentifier ~ (
         expressionList ~> ((ident: TableIdentifier, e: Seq[Expression]) =>
           internals.newUnresolvedTableValuedFunction(ident.unquotedString, e, Nil)) |
-        streamWindowOptions.? ~> ((tableIdent: TableIdentifier, window: Any) =>
-          window.asInstanceOf[Option[(Duration, Option[Duration])]] match {
-            case None => internals.newUnresolvedRelation(tableIdent, None)
-            case Some(win) =>
-              WindowLogicalPlan(win._1, win._2, internals.newUnresolvedRelation(tableIdent, None))
-          })
-    ) |
-    O_PAREN ~ queryNoWith ~ C_PAREN ~ streamWindowOptions.? ~> { (child: LogicalPlan, w: Any) =>
-      w.asInstanceOf[Option[(Duration, Option[Duration])]] match {
-        case None => child
-        case Some(win) => WindowLogicalPlan(win._1, win._2, child)
-      }
-    }
+        // noinspection ScalaUnnecessaryParentheses
+        MATCH ~> ((ident: TableIdentifier) => UnresolvedRelation(ident))
+    )
   }
 
   protected final def inlineTable: Rule1[LogicalPlan] = rule {
-    VALUES ~ CACHE_LITERAL_SKIP ~ (expression + commaSep) ~ alias.? ~ identifierList.? ~
-        CACHE_LITERAL_RESTORE ~> ((valuesExpr: Seq[Expression], alias: Any, identifiers: Any) => {
+    VALUES ~ CACHE_LITERAL_SKIP ~ (expression + commaSep) ~ tableAlias.? ~
+        CACHE_LITERAL_RESTORE ~> ((valuesExpr: Seq[Expression], a: Any) => {
       val rows = valuesExpr.map {
         // e.g. values (1), (2), (3)
         case struct: CreateNamedStruct => struct.valExprs
         // e.g. values 1, 2, 3
         case child => Seq(child)
       }
-      val aliases = identifiers match {
-        case None => Seq.tabulate(rows.head.size)(i => s"col${i + 1}")
-        case Some(ids) => ids.asInstanceOf[Seq[String]]
+      val optAlias = a.asInstanceOf[Option[(String, Seq[String])]]
+      val aliases = optAlias match {
+        case Some(ids) if ids._2.nonEmpty => ids._2
+        case _ => Seq.tabulate(rows.head.size)(i => s"col${i + 1}")
       }
-      alias.asInstanceOf[Option[String]] match {
+      optAlias match {
         case None => UnresolvedInlineTable(aliases, rows)
-        case Some(id) => internals.newSubqueryAlias(id, UnresolvedInlineTable(aliases, rows))
+        case Some(id) => internals.newSubqueryAlias(id._1, UnresolvedInlineTable(aliases, rows))
       }
     })
+  }
+
+  protected final def handleSubqueryAlias(aliasSpec: Option[(String, Seq[String])],
+      plan: LogicalPlan): LogicalPlan = aliasSpec match {
+    case None =>
+      // For un-aliased subqueries, use a default alias name that is not likely to conflict with
+      // normal subquery names, so that parent operators can only access the columns in subquery by
+      // unqualified names. Users can still use this special qualifier to access columns if they
+      // know it, but that's not recommended.
+      internals.newSubqueryAlias("__auto_generated_subquery_name", plan)
+    case Some((alias, columnAliases)) =>
+      internals.newUnresolvedColumnAliases(columnAliases, internals.newSubqueryAlias(alias, plan))
+  }
+
+  protected final def handleRelationAlias(aliasSpec: Option[(String, Seq[String])],
+      u: UnresolvedRelation, plan: LogicalPlan): LogicalPlan = aliasSpec match {
+    case None => plan
+    case Some((alias, columnAliases)) =>
+      val tableIdent = u.tableIdentifier
+      updatePerTableQueryHint(tableIdent, aliasSpec)
+      internals.newUnresolvedColumnAliases(columnAliases, internals.newSubqueryAlias(alias, plan))
+  }
+
+  private final def withWindow(window: Option[(Duration, Option[Duration])],
+      plan: LogicalPlan): LogicalPlan = window match {
+    case None => plan
+    case Some(w) => WindowLogicalPlan(w._1, w._2, plan)
+  }
+
+  private final def withSample(sample: Option[LogicalPlan => LogicalPlan],
+      plan: LogicalPlan): LogicalPlan = sample match {
+    case None => plan
+    case Some(s) => s(plan)
+  }
+
+  protected final def relationPrimary: Rule1[LogicalPlan] = rule {
+    inlineTable |
+    (baseTable | (O_PAREN ~ relation ~ C_PAREN) | queryNoWith) ~ streamWindowOptions.? ~
+        sample.? ~ tableAlias.? ~> { (rel: LogicalPlan, w: Any, s: Any, a: Any) =>
+      val window = w.asInstanceOf[Option[(Duration, Option[Duration])]]
+      val sample = s.asInstanceOf[Option[LogicalPlan => LogicalPlan]]
+      val optAlias = a.asInstanceOf[Option[(String, Seq[String])]]
+      rel match {
+        case u: UnresolvedRelation =>
+          handleRelationAlias(optAlias, u, withSample(sample, withWindow(window, u)))
+        case u: UnresolvedTableValuedFunction =>
+          assertNoQueryHint(u, optAlias)
+          if (optAlias.isEmpty) withSample(sample, withWindow(window, u))
+          else {
+            internals.newSubqueryAlias(optAlias.get._1,
+              withSample(sample, withWindow(window, internals.newUnresolvedTableValuedFunction(
+                u.functionName, u.functionArgs, optAlias.get._2))))
+          }
+        case _ =>
+          assertNoQueryHint(rel, optAlias)
+          handleSubqueryAlias(optAlias, withSample(sample, withWindow(window, rel)))
+      }
+    }
   }
 
   protected final def joinType: Rule1[JoinType] = rule {
@@ -1007,8 +1002,7 @@ class SnappyParser(session: SnappySession)
       })
   }
 
-  protected final def queryOrganization: Rule1[LogicalPlan =>
-      LogicalPlan] = rule {
+  protected def queryOrganization: Rule1[LogicalPlan => LogicalPlan] = rule {
     (ORDER ~ BY ~ ordering ~> ((o: Seq[SortOrder]) =>
       (l: LogicalPlan) => Sort(o, global = true, l)) |
     SORT ~ BY ~ ordering ~ distributeBy.? ~> ((o: Seq[SortOrder], d: Any) =>
@@ -1022,29 +1016,34 @@ class SnappyParser(session: SnappySession)
     (WINDOW ~ ((identifier ~ AS ~ windowSpec ~>
         ((id: String, w: WindowSpec) => id -> w)) + commaSep)).? ~
     ((LIMIT ~ (capture(ALL) | CACHE_LITERAL_SKIP ~ expression ~ CACHE_LITERAL_RESTORE)) |
-        fetchExpression).? ~> { (o: Any, w: Any, e: Any) => (l: LogicalPlan) =>
-      val withOrder = o.asInstanceOf[Option[LogicalPlan => LogicalPlan]]
-          .map(_ (l)).getOrElse(l)
-      val window = w.asInstanceOf[Option[Seq[(String, WindowSpec)]]].map { ws =>
-        val baseWindowMap = ws.toMap
-        val windowMapView = baseWindowMap.mapValues {
-          case WindowSpecReference(name) =>
-            baseWindowMap.get(name) match {
-              case Some(spec: WindowSpecDefinition) => spec
-              case Some(_) => throw new ParseException(
-                s"Window reference '$name' is not a window specification")
-              case None => throw new ParseException(
-                s"Cannot resolve window reference '$name'")
-            }
-          case spec: WindowSpecDefinition => spec
-        }
+    fetchExpression).? ~> { (o: Any, w: Any, e: Any) => (l: LogicalPlan) =>
+      val withOrder = o.asInstanceOf[Option[LogicalPlan => LogicalPlan]] match {
+        case None => l
+        case Some(m) => m(l)
+      }
+      val withWindow = w.asInstanceOf[Option[Seq[(String, WindowSpec)]]] match {
+        case None => withOrder
+        case Some(ws) =>
+          val baseWindowMap = ws.toMap
+          val windowMapView = baseWindowMap.mapValues {
+            case WindowSpecReference(name) =>
+              baseWindowMap.get(name) match {
+                case Some(spec: WindowSpecDefinition) => spec
+                case Some(_) => throw new ParseException(
+                  s"Window reference '$name' is not a window specification")
+                case None => throw new ParseException(
+                  s"Cannot resolve window reference '$name'")
+              }
+            case spec: WindowSpecDefinition => spec
+          }
 
-        // Note that mapValues creates a view, so force materialization.
-        WithWindowDefinition(windowMapView.map(identity), withOrder)
-      }.getOrElse(withOrder)
+          // Note that mapValues creates a view, so force materialization.
+          WithWindowDefinition(windowMapView.map(identity), withOrder)
+      }
+      // can be None or Some[Expression] (LIMIT or FETCH FIRST) or Some[String] (LIMIT ALL)
       e match {
-        case Some(e: Expression) => Limit(e, window)
-        case _ => window
+        case Some(e: Expression) => Limit(e, withWindow)
+        case _ => withWindow
       }
     }
   }
@@ -1105,14 +1104,6 @@ class SnappyParser(session: SnappySession)
     )
   }
 
-  protected final def relationPrimary: Rule1[LogicalPlan] = rule {
-    inlineTable | baseRelation |
-    O_PAREN ~ relation ~ C_PAREN ~ alias.? ~> ((r: LogicalPlan, a: Any) => a match {
-      case None => r
-      case Some(n) => internals.newSubqueryAlias(n.asInstanceOf[String], r)
-    })
-  }
-
   protected final def withHints(plan: LogicalPlan): LogicalPlan = {
     if (hasPlanHints) {
       var newPlan = plan
@@ -1146,8 +1137,8 @@ class SnappyParser(session: SnappySession)
     ).*
   }
 
-  protected final def relations: Rule1[LogicalPlan] = rule {
-    (relation + commaSep) ~ lateralView.* ~ pivot.? ~> ((joins: Seq[LogicalPlan],
+  protected final def fromClause: Rule1[LogicalPlan] = rule {
+    FROM ~ (relation + commaSep) ~ lateralView.* ~ pivot.? ~> ((joins: Seq[LogicalPlan],
         v: Any, createPivot: Any) => {
       val from = if (joins.size == 1) joins.head
       else joins.tail.foldLeft(joins.head) {
@@ -1181,17 +1172,21 @@ class SnappyParser(session: SnappySession)
     (ALL ~ push(true) | DISTINCT ~ push(false)).? ~> ((e: Any) => e.asInstanceOf[Option[Boolean]])
   }
 
-  protected def select: Rule1[LogicalPlan] = rule {
+  protected def querySpecification: Rule1[LogicalPlan] = rule {
     SELECT ~ (DISTINCT ~ push(true)).? ~
     PROJECTION_BEGIN ~ namedExpressionSeq ~ PROJECTION_END ~
-    (FROM ~ relations).? ~
+    fromClause.? ~
     CACHE_LITERAL_BEGIN ~ (WHERE ~ expression).? ~
     groupBy.? ~
-    (HAVING ~ expression).? ~
-    queryOrganization ~ SELECT_STMT_END ~> { (d: Any, p: Seq[Expression], f: Any, w: Any,
-        g: Any, h: Any, q: LogicalPlan => LogicalPlan) =>
+    (HAVING ~ expression).? ~ SELECT_STMT_END ~> { (d: Any, p: Seq[Expression], f: Any, w: Any,
+        g: Any, h: Any) =>
       val base = f match {
-        case Some(plan) => plan.asInstanceOf[LogicalPlan]
+        case Some(plan) =>
+          if (_fromRelations.nonEmpty) {
+            throw new ParseException("Multi-Insert queries cannot have a FROM clause " +
+                "in their individual SELECT statements")
+          }
+          plan.asInstanceOf[LogicalPlan]
         case _ => if (_fromRelations.isEmpty) internals.newOneRowRelation() else _fromRelations.top
       }
       val withFilter = (child: LogicalPlan) => w match {
@@ -1200,7 +1195,7 @@ class SnappyParser(session: SnappySession)
       }
       val expressions = p.map(named)
       val gr = g.asInstanceOf[Option[(Seq[Expression], Seq[Seq[Expression]], String)]]
-      val withProjection = gr match {
+      var withProjection = gr match {
         case Some(x) => x._3 match {
           // group by cols with rollup
           case "ROLLUP" => Aggregate(Seq(Rollup(x._1)), expressions, withFilter(base))
@@ -1217,34 +1212,48 @@ class SnappyParser(session: SnappySession)
           // just "group by cols"
           case _ => Aggregate(x._1, expressions, withFilter(base))
         }
-        case _ => Project(expressions, withFilter(base))
-      }
-      val withDistinct = d match {
-        case None => withProjection
-        case Some(_) => Distinct(withProjection)
+        case _ =>
+          if (expressions.isEmpty) withFilter(base) else Project(expressions, withFilter(base))
       }
       val withHaving = h match {
-        case None => withDistinct
-        case Some(expr) => Filter(expr.asInstanceOf[Expression], withDistinct)
+        case None => withProjection
+        case Some(expr) =>
+          // Add a cast to non-predicate expressions. If the expression itself is
+          // already boolean, the optimizer will get rid of the unnecessary cast.
+          val predicate = expr.asInstanceOf[Expression] match {
+            case p: Predicate => p
+            case e => Cast(e, BooleanType)
+          }
+          // use Spark 2.4 behaviour for HAVING without GROUP BY
+          if (gr.isEmpty &&
+              !session.conf.get("spark.sql.legacy.parser.havingWithoutGroupByAsWhere", "false")
+                  .equalsIgnoreCase("true")) {
+            withProjection = Aggregate(Nil, expressions, withFilter(base))
+          }
+          internals.newUnresolvedHaving(predicate, withProjection)
       }
-      q(withHaving)
+      d match {
+        case None => withHaving
+        case Some(_) => Distinct(withHaving)
+      }
     }
   }
 
   protected final def queryPrimary: Rule1[LogicalPlan] = rule {
-    select |
-    TABLE ~ tableIdentifier ~> ((r: TableIdentifier) => internals.newUnresolvedRelation(r, None)) |
-    inlineTable |
-    (O_PAREN ~ queryNoWith ~ C_PAREN)
+    querySpecification |
+    O_PAREN ~ queryNoWith ~ C_PAREN |
+    // noinspection ConvertibleToMethodValue
+    TABLE ~ tableIdentifier ~> (UnresolvedRelation(_)) |
+    inlineTable
   }
 
   /**
    * In Spark 2.3 onwards, INTERSECT has a precedence over other set operators unless
    * [[legacySetOpsPrecedence]] is set (in which case all have the same precedence).
    * This is handled using the intermediate rule below which will then be used in the
-   * main rule of [[queryTerm]] ensuring that all INTERSECT operators are resolved first.
+   * main rule of [[select]] ensuring that all INTERSECT operators are resolved first.
    */
-  protected final def queryTermIntersect: Rule1[LogicalPlan] = rule {
+  private final def queryIntersect: Rule1[LogicalPlan] = rule {
     queryPrimary.named("select") ~ (
         test(!legacySetOpsPrecedence) ~ INTERSECT ~ setQuantifier ~ queryPrimary.named("select") ~>
             ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
@@ -1252,30 +1261,39 @@ class SnappyParser(session: SnappySession)
     ).*
   }
 
-  protected final def queryTerm: Rule1[LogicalPlan] = rule {
-    queryTermIntersect.named("select") ~ (
-        UNION ~ setQuantifier ~ queryTermIntersect.named("select") ~>
+  /**
+   * Other set operators UNION, EXCEPT, MINUS (and INTERSECT for legacySetOpsPrecedence)
+   */
+  protected final def querySetOp: Rule1[LogicalPlan] = rule {
+    queryIntersect.named("select") ~ (
+        UNION ~ setQuantifier ~ queryIntersect.named("select") ~>
             ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
               if (quantifier.contains(true)) Union(q1, q2) else Distinct(Union(q1, q2))) |
         test(legacySetOpsPrecedence) ~ INTERSECT ~ setQuantifier ~
-            queryTermIntersect.named("select") ~> ((q1: LogicalPlan, quantifier: Option[Boolean],
+            queryIntersect.named("select") ~> ((q1: LogicalPlan, quantifier: Option[Boolean],
             q2: LogicalPlan) => internals.newIntersect(q1, q2, quantifier.contains(true))) |
-        (EXCEPT | MINUS) ~ setQuantifier ~ queryTermIntersect.named("select") ~>
+        (EXCEPT | MINUS) ~ setQuantifier ~ queryIntersect.named("select") ~>
             ((q1: LogicalPlan, quantifier: Option[Boolean], q2: LogicalPlan) =>
               internals.newExcept(q1, q2, quantifier.contains(true)))
     ).*
   }
 
-  // noinspection ScalaUnnecessaryParentheses
+  /**
+   * Full SELECT statement with possible set operations (UNION, INTERSECT etc)
+   * and possibly ending with [[queryOrganization]] (ORDER BY, LIMIT etc)
+   */
+  protected def select: Rule1[LogicalPlan] = rule {
+    querySetOp ~ queryOrganization ~> ((q: LogicalPlan, o: LogicalPlan => LogicalPlan) => o(q))
+  }
+
   protected final def query: Rule1[LogicalPlan] = rule {
     queryNoWith | ctes
   }
 
-  // noinspection ScalaUnnecessaryParentheses
   protected final def queryNoWith: Rule1[LogicalPlan] = rule {
-    queryTerm |
-    FROM ~ relations ~> (_fromRelations.push(_): Unit) ~
-        (queryTerm | insert). + ~> { (queries: Seq[LogicalPlan]) =>
+    select |
+    fromClause ~> (_fromRelations.push(_): Unit) ~
+        (select | insert | put | delete). + ~> { (queries: Seq[LogicalPlan]) =>
       _fromRelations.pop()
       if (queries.length == 1) queries.head else Union(queries)
     }
@@ -1311,7 +1329,7 @@ class SnappyParser(session: SnappySession)
 
   protected final def insert: Rule1[LogicalPlan] = rule {
     INSERT ~ (OVERWRITE ~ push(true) | INTO ~ push(false)) ~ TABLE.? ~
-        baseRelation ~ partitionSpec ~ ifNotExists ~ queryTerm ~> ((overwrite: Boolean,
+        baseTable ~ partitionSpec ~ ifNotExists ~ select ~> ((overwrite: Boolean,
         r: LogicalPlan, spec: Map[String, Option[String]], exists: Boolean, q: LogicalPlan) =>
       internals.newInsertIntoTable(r, spec, q, overwrite, exists)) |
     INSERT ~ OVERWRITE ~ LOCAL.? ~ DIRECTORY ~ ANY. + ~> (() =>
@@ -1319,14 +1337,14 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def put: Rule1[LogicalPlan] = rule {
-    PUT ~ INTO ~ TABLE.? ~ baseRelation ~ queryTerm ~> PutIntoTable
+    PUT ~ INTO ~ TABLE.? ~ baseTable ~ select ~> PutIntoTable
   }
 
   protected final def update: Rule1[LogicalPlan] = rule {
     UPDATE ~ tableIdentifier ~ SET ~ CACHE_LITERAL_BEGIN ~ (((identifier + ('.' ~ ws)) ~
         '=' ~ ws ~ expression ~> ((cols: Seq[String], e: Expression) =>
       UnresolvedAttribute(cols) -> e)) + commaSep) ~ CACHE_LITERAL_END ~
-        (FROM ~ relations).? ~ (WHERE ~ CACHE_LITERAL_BEGIN ~ expression ~ CACHE_LITERAL_END).? ~>
+        fromClause.? ~ (WHERE ~ CACHE_LITERAL_BEGIN ~ expression ~ CACHE_LITERAL_END).? ~>
         ((t: TableIdentifier, updateExprs: Seq[(UnresolvedAttribute, Expression)],
             relations: Any, whereExpr: Any) => {
           val table = session.sessionCatalog.resolveRelationWithAlias(t)
@@ -1344,25 +1362,28 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def delete: Rule1[LogicalPlan] = rule {
-    DELETE ~ FROM ~ baseRelation ~ (
+    DELETE ~ FROM ~ baseTable ~ (
         WHERE ~ CACHE_LITERAL_BEGIN ~ expression ~ CACHE_LITERAL_END ~>
             ((base: LogicalPlan, expr: Expression) => Delete(base, Filter(expr, base), Nil)) |
-        query ~> DeleteFromTable |
+        select ~> DeleteFromTable |
         MATCH ~> ((base: LogicalPlan) => Delete(base, base, Nil))
     )
   }
 
   protected final def ctes: Rule1[LogicalPlan] = rule {
     WITH ~ ((identifier ~ AS.? ~ O_PAREN ~ query ~ C_PAREN ~>
-        ((id: String, p: LogicalPlan) => (id, p))) + commaSep) ~
-        queryNoWith ~> ((r: Seq[(String, LogicalPlan)], s: LogicalPlan) =>
-        With(s, r.map(ns => (ns._1, internals.newSubqueryAlias(ns._1, ns._2)))))
+        ((id: String, p: LogicalPlan) => (id, p))) + commaSep) ~ (queryNoWith |
+        insert | put | delete) ~> ((r: Seq[(String, LogicalPlan)], s: LogicalPlan) =>
+      With(s, r.map(ns => (ns._1,
+          // always expect resolution of alias on `query` to be SubqeryAlias
+          // and never an UnresolvedRelation
+          internals.newSubqueryAlias(ns._1, ns._2).asInstanceOf[SubqueryAlias]))))
   }
 
   protected def dmlOperation: Rule1[LogicalPlan] = rule {
     capture(INSERT ~ INTO) ~ tableIdentifier ~
         capture(ANY.*) ~> ((c: String, r: TableIdentifier, s: String) => DMLExternalTable(
-      internals.newUnresolvedRelation(r, None), s"$c ${quotedUppercaseId(r)} $s"))
+      UnresolvedRelation(r), s"$c ${quotedUppercaseId(r)} $s"))
   }
 
   // It can be the following patterns:
@@ -1396,7 +1417,7 @@ class SnappyParser(session: SnappySession)
       val servers = if (ClientSharedUtils.isThriftDefault) "THRIFTSERVERS" else "NETSERVERS"
       newParser.parseSQL(
         s"SELECT ID, HOST, KIND, STATUS, $servers, SERVERGROUPS FROM SYS.MEMBERS",
-        newParser.select.run())
+        newParser.querySpecification.run())
     }) |
     SHOW ~ strictIdentifier.? ~ FUNCTIONS ~ (LIKE.? ~
         (functionIdentifier | stringLiteral)).? ~> { (id: Any, nameOrPat: Any) =>
@@ -1449,8 +1470,8 @@ class SnappyParser(session: SnappySession)
   }
 
   protected final def partitionVal: Rule1[(String, Option[String])] = rule {
-    identifier ~ ('=' ~ '='.? ~ ws ~ (stringLiteral | numericLiteral |
-        booleanLiteral ~> ((b: Boolean) => b.toString))).? ~>
+    identifier ~ ('=' ~ '='.? ~ ws ~ (stringLiterals | numericLiteral |
+        booleanLiteral ~> (_.toString) | NULL ~> (() => Consts.NULL.lower))).? ~>
         ((id: String, e: Any) => id -> e.asInstanceOf[Option[String]])
   }
 
@@ -1519,12 +1540,14 @@ class SnappyParser(session: SnappySession)
   }
 
   private final def initConf(): Unit = {
-    caseSensitive = session.sessionState.conf.caseSensitiveAnalysis
-    escapedStringLiterals = session.conf.get(
+    val conf = session.sessionState.conf
+    caseSensitive = conf.caseSensitiveAnalysis
+    escapedStringLiterals = conf.getConfString(
       "spark.sql.parser.escapedStringLiterals", "false").equalsIgnoreCase("true")
-    quotedRegexColumnNames = session.conf.get(
+    sparkCompatible = !Property.HiveCompatibility.get(conf).equalsIgnoreCase("snappy")
+    quotedRegexColumnNames = conf.getConfString(
       "spark.sql.parser.quotedRegexColumnNames", "false").equalsIgnoreCase("true")
-    legacySetOpsPrecedence = session.conf.get(
+    legacySetOpsPrecedence = conf.getConfString(
       "spark.sql.legacy.setopsPrecedence.enabled", "false").equalsIgnoreCase("true")
   }
 

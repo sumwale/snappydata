@@ -32,7 +32,7 @@ import io.snappydata.{Constant, Property}
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.config.{ConfigBuilder, ConfigEntry, TypedConfigBuilder}
 import org.apache.spark.sql.catalyst.analysis
-import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedAttribute, UnresolvedTableValuedFunction}
+import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedAttribute, UnresolvedRelation, UnresolvedTableValuedFunction}
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Cast, Contains, EndsWith, EqualTo, Expression, Like, Literal, NamedExpression, StartsWith}
 import org.apache.spark.sql.catalyst.optimizer.ReorderJoin
 import org.apache.spark.sql.catalyst.plans.QueryPlan
@@ -191,10 +191,10 @@ class SnappyConf(@transient val session: SnappySession)
     case Property.HiveCompatibility.name =>
       value match {
         case Some(level) => Utils.toLowerCase(level.toString) match {
-          case "default" | "spark" | "full" =>
+          case "snappy" | "spark" | "full" =>
           case _ => throw new IllegalArgumentException(
             s"Unexpected value '$level' for ${Property.HiveCompatibility.name}. " +
-                "Allowed values are: default, spark and full")
+                "Allowed values are: snappy, spark and full")
         }
         case None =>
       }
@@ -322,12 +322,7 @@ class SnappyConf(@transient val session: SnappySession)
 
   override def setConf[T](entry: ConfigEntry[T], value: T): Unit = {
     keyUpdateActions(entry.key, Some(value), doSet = true, search = false)
-    require(entry != null, "entry cannot be null")
-    require(value != null, s"value cannot be null for key: ${entry.key}")
-    entry.defaultValue match {
-      case Some(_) => super.setConf(entry, value)
-      case None => super.setConf(entry.asInstanceOf[ConfigEntry[Option[T]]], Some(value))
-    }
+    super.setConf(entry, value)
     if (session.enableHiveSupport) hiveConf.setConf(entry, value)
   }
 
@@ -358,6 +353,14 @@ class SnappyConf(@transient val session: SnappySession)
     super.clear()
     resetOverrides()
   }
+
+  override def clone(): SQLConf = {
+    val result = new SnappyConf(session)
+    getAllConfs.foreach {
+      case(k, v) => if (v ne null) result.setConfString(k, v)
+    }
+    result
+  }
 }
 
 class SQLConfigEntry private(private[sql] val entry: ConfigEntry[_]) {
@@ -383,6 +386,11 @@ class SQLConfigEntry private(private[sql] val entry: ConfigEntry[_]) {
 
 object SQLConfigEntry extends SparkSupport {
 
+  private def withParams(builder: ConfigBuilder, doc: String,
+      isPublic: Boolean): ConfigBuilder = {
+    if (isPublic) builder.doc(doc) else builder.doc(doc).internal()
+  }
+
   private def handleDefault[T](entry: TypedConfigBuilder[T],
       defaultValue: Option[T]): SQLConfigEntry = defaultValue match {
     case Some(v) => new SQLConfigEntry(entry.createWithDefault(v))
@@ -392,38 +400,36 @@ object SQLConfigEntry extends SparkSupport {
   def sparkConf[T: ClassTag](key: String, doc: String, defaultValue: Option[T],
       isPublic: Boolean = true): SQLConfigEntry = {
     classTag[T] match {
-      case ClassTag.Int => handleDefault[Int](ConfigBuilder(key)
-          .doc(doc).intConf, defaultValue.asInstanceOf[Option[Int]])
-      case ClassTag.Long => handleDefault[Long](ConfigBuilder(key)
-          .doc(doc).longConf, defaultValue.asInstanceOf[Option[Long]])
-      case ClassTag.Double => handleDefault[Double](ConfigBuilder(key)
-          .doc(doc).doubleConf, defaultValue.asInstanceOf[Option[Double]])
-      case ClassTag.Boolean => handleDefault[Boolean](ConfigBuilder(key)
-          .doc(doc).booleanConf, defaultValue.asInstanceOf[Option[Boolean]])
+      case ClassTag.Int => handleDefault[Int](withParams(ConfigBuilder(key),
+        doc, isPublic).intConf, defaultValue.asInstanceOf[Option[Int]])
+      case ClassTag.Long => handleDefault[Long](withParams(ConfigBuilder(key),
+        doc, isPublic).longConf, defaultValue.asInstanceOf[Option[Long]])
+      case ClassTag.Double => handleDefault[Double](withParams(ConfigBuilder(key),
+        doc, isPublic).doubleConf, defaultValue.asInstanceOf[Option[Double]])
+      case ClassTag.Boolean => handleDefault[Boolean](withParams(ConfigBuilder(key),
+        doc, isPublic).booleanConf, defaultValue.asInstanceOf[Option[Boolean]])
       case c if c.runtimeClass == classOf[String] =>
-        handleDefault[String](ConfigBuilder(key).doc(doc).stringConf,
+        handleDefault[String](withParams(ConfigBuilder(key), doc, isPublic).stringConf,
           defaultValue.asInstanceOf[Option[String]])
-      case c => throw new IllegalArgumentException(
-        s"Unknown type of configuration key: $c")
+      case c => throw new IllegalArgumentException(s"Unknown type of configuration key: $c")
     }
   }
 
   def apply[T: ClassTag](key: String, doc: String, defaultValue: Option[T],
       isPublic: Boolean = true): SQLConfigEntry = {
     classTag[T] match {
-      case ClassTag.Int => handleDefault[Int](internals.buildConf(key)
-          .doc(doc).intConf, defaultValue.asInstanceOf[Option[Int]])
-      case ClassTag.Long => handleDefault[Long](internals.buildConf(key)
-          .doc(doc).longConf, defaultValue.asInstanceOf[Option[Long]])
-      case ClassTag.Double => handleDefault[Double](internals.buildConf(key)
-          .doc(doc).doubleConf, defaultValue.asInstanceOf[Option[Double]])
-      case ClassTag.Boolean => handleDefault[Boolean](internals.buildConf(key)
-          .doc(doc).booleanConf, defaultValue.asInstanceOf[Option[Boolean]])
+      case ClassTag.Int => handleDefault[Int](withParams(internals.buildConf(key),
+        doc, isPublic).intConf, defaultValue.asInstanceOf[Option[Int]])
+      case ClassTag.Long => handleDefault[Long](withParams(internals.buildConf(key),
+        doc, isPublic).longConf, defaultValue.asInstanceOf[Option[Long]])
+      case ClassTag.Double => handleDefault[Double](withParams(internals.buildConf(key),
+        doc, isPublic).doubleConf, defaultValue.asInstanceOf[Option[Double]])
+      case ClassTag.Boolean => handleDefault[Boolean](withParams(internals.buildConf(key),
+        doc, isPublic).booleanConf, defaultValue.asInstanceOf[Option[Boolean]])
       case c if c.runtimeClass == classOf[String] =>
-        handleDefault[String](internals.buildConf(key).doc(doc).stringConf,
+        handleDefault[String](withParams(internals.buildConf(key), doc, isPublic).stringConf,
           defaultValue.asInstanceOf[Option[String]])
-      case c => throw new IllegalArgumentException(
-        s"Unknown type of configuration key: $c")
+      case c => throw new IllegalArgumentException(s"Unknown type of configuration key: $c")
     }
   }
 }
@@ -664,7 +670,7 @@ private[sql] final class PreprocessTable(state: SnappySessionState)
           (tableDesc.bucketSpec.isEmpty && tableDesc.partitionColumnNames.isEmpty)) &&
           state.catalog.tableExists(tableIdent)) {
         internals.newInsertIntoTable(
-          table = internals.newUnresolvedRelation(tableIdent, None),
+          table = UnresolvedRelation(tableIdent),
           partition = Map.empty, child = queryOpt.get, overwrite = false, ifNotExists = false)
       } else if (isBuiltin) {
         val tableName = tableIdent.unquotedString

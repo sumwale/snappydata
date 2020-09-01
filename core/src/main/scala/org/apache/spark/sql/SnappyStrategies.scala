@@ -18,6 +18,7 @@ package org.apache.spark.sql
 
 import java.sql.SQLWarning
 
+import scala.annotation.tailrec
 import scala.util.control.NonFatal
 
 import com.pivotal.gemfirexd.internal.shared.common.reference.SQLState
@@ -359,6 +360,7 @@ private[sql] object JoinStrategy extends SparkSupport {
    * Check for joinType query hint. A return value of Some(hint) indicates the query hint
    * for the join operation, if any, else this returns None.
    */
+  @tailrec
   private[sql] def getJoinHint(plan: LogicalPlan): Option[HintName.Type] = plan match {
     case p if internals.isHintPlan(p) => internals.getHints(p).get(QueryHint.JoinType)
     case _: Filter | _: Project | _: LocalLimit =>
@@ -451,25 +453,22 @@ class SnappyAggregationStrategy(planner: SparkPlanner)
     case _ => applyAggregation(plan, isRootPlan = false)
   }
 
-  def applyAggregation(plan: LogicalPlan,
+  private def applyAggregation(plan: LogicalPlan,
       isRootPlan: Boolean): Seq[SparkPlan] = plan match {
     case PhysicalAggregation(groupingExpressions, aggExpressions,
     resultExpressions, child) if (maxAggregateInputSize == 0 ||
         internals.getStatistics(child).sizeInBytes <= maxAggregateInputSize) &&
-        aggExpressions.forall(expr => expr.isInstanceOf[AggregateExpression]) =>
+        aggExpressions.forall(_.isInstanceOf[AggregateExpression]) =>
 
-      // noinspection ScalaRedundantCast
-      val aggregateExpressions = aggExpressions.map(expr =>
-        expr.asInstanceOf[AggregateExpression])
+      val aggregateExpressions = aggExpressions.map(_.asInstanceOf[AggregateExpression])
+
       val (functionsWithDistinct, functionsWithoutDistinct) =
         aggregateExpressions.partition(_.isDistinct)
-      if (functionsWithDistinct.map(_.aggregateFunction.children)
-          .distinct.length > 1) {
-        // This is a sanity check. We should not reach here when we have
-        // multiple distinct column sets. The MultipleDistinctRewriter
-        // should take care this case.
-        sys.error("You hit a query analyzer bug. Please report your query " +
-            "to Spark user mailing list.")
+      if (functionsWithDistinct.map(_.aggregateFunction.children.toSet).distinct.length > 1) {
+        // This is a sanity check. We should not reach here when we have multiple distinct
+        // column sets. Our `RewriteDistinctAggregates` should take care this case.
+        sys.error("You hit a query analyzer bug. Please report your query to " +
+            "Spark user mailing list.")
       }
 
       val aggregateOperator =

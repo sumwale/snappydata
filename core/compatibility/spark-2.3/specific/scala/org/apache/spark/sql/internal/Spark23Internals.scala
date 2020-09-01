@@ -29,7 +29,7 @@ import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, ExprId, Expression, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Except, Intersect, LogicalPlan, Pivot}
+import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Except, Filter, Intersect, LogicalPlan, Pivot}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.bootstrap.{ApproxColumnExtractor, Tag, TaggedAlias, TaggedAttribute, TransformableTag}
 import org.apache.spark.sql.execution.closedform.{ClosedFormColumnExtractor, ErrorAggregate, ErrorEstimateAttribute}
@@ -148,7 +148,7 @@ class Spark23Internals(override val version: String) extends Spark23_4_Internals
   }
 
   override def newSnappySessionState(snappySession: SnappySession): SnappySessionState = {
-    new SnappySessionStateBuilder23(snappySession).build()
+    new SnappySessionStateBuilder23(snappySession, snappySession.cloneSessionState).build()
   }
 
   override def newCacheManager(): CacheManager = new SnappyCacheManager23
@@ -224,6 +224,10 @@ class Spark23Internals(override val version: String) extends Spark23_4_Internals
       throw new ParseException(s"EXCEPT ALL not supported in spark $version")
     }
     Except(left, right)
+  }
+
+  override def newUnresolvedHaving(predicate: Expression, child: LogicalPlan): LogicalPlan = {
+    Filter(predicate, child)
   }
 
   override def cachedColumnBuffers(relation: InMemoryRelation): RDD[_] = {

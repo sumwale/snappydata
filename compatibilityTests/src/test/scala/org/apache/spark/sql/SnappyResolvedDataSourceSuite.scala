@@ -16,8 +16,20 @@
  */
 package org.apache.spark.sql
 
+import org.apache.spark.sql.execution.datasources.DataSource
 import org.apache.spark.sql.sources.ResolvedDataSourceSuite
 import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil}
 
 class SnappyResolvedDataSourceSuite extends ResolvedDataSourceSuite
-    with SharedSnappySessionContext with SnappySparkTestUtil
+    with SharedSnappySessionContext with SnappySparkTestUtil {
+
+  override def excluded: Seq[String] = Seq(
+    // test run includes kafka module by default
+    "kafka: show deploy guide for loading the external kafka module"
+  )
+
+  test("kafka") {
+    assert(DataSource(sparkSession = spark, className = "kafka").providingClass.getName ===
+        "org.apache.spark.sql.kafka010.KafkaSourceProvider")
+  }
+}

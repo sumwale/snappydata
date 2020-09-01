@@ -68,6 +68,8 @@ case class HashJoinExec(leftKeys: Seq[Expression],
 
   override def needCopyResult: Boolean = false
 
+  override def needStopCheck: Boolean = parent.needStopCheck
+
   @transient private var mapAccessor: ObjectHashMapAccessor = _
   @transient private var hashMapTerm: String = _
   @transient private var mapDataTerm: String = _
@@ -156,8 +158,8 @@ case class HashJoinExec(leftKeys: Seq[Expression],
         // add the build-side shuffle dependencies to first stream-side RDD
         new DelegateRDD[InternalRow](streamRDD.sparkContext, streamRDD, buildRDDs,
           preferredLocations, streamRDD.dependencies ++ buildShuffleDeps) +:
-          streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
-            rdd.sparkContext, rdd, buildRDDs, preferredLocations))
+            streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
+              rdd.sparkContext, rdd, buildRDDs, preferredLocations))
       } else {
         new DelegateRDD[InternalRow](streamRDD.sparkContext, streamRDD, buildRDDs,
           preferredLocations) +: streamRDDs.tail
@@ -169,7 +171,7 @@ case class HashJoinExec(leftKeys: Seq[Expression],
       // Get the build side shuffle dependencies.
       val buildShuffleDeps: Seq[Dependency[_]] = buildRDDs.flatMap(findShuffleDependencies)
       val hasStreamSideShuffle = streamRDDs.exists(_.dependencies
-        .exists(_.isInstanceOf[ShuffleDependency[_, _, _]]))
+          .exists(_.isInstanceOf[ShuffleDependency[_, _, _]]))
       // treat as a zip of all stream side RDDs and build side RDDs and
       // use intersection of preferred locations, if possible, else union
 
@@ -201,8 +203,8 @@ case class HashJoinExec(leftKeys: Seq[Expression],
         val rdd = streamRDDs.head
         new DelegateRDD[InternalRow](rdd.sparkContext, rdd, buildRDDs,
           preferredLocations, rdd.dependencies ++ buildShuffleDeps) +:
-          streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
-            rdd.sparkContext, rdd, buildRDDs, preferredLocations))
+            streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
+              rdd.sparkContext, rdd, buildRDDs, preferredLocations))
       } else {
         streamRDDs.map(rdd => new DelegateRDD[InternalRow](
           rdd.sparkContext, rdd, buildRDDs, preferredLocations))
@@ -213,7 +215,7 @@ case class HashJoinExec(leftKeys: Seq[Expression],
     }
   }
 
-  private def refreshRDDs() : (Seq[RDD[InternalRow]], Seq[RDD[InternalRow]]) = {
+  private def refreshRDDs(): (Seq[RDD[InternalRow]], Seq[RDD[InternalRow]]) = {
     val streamRDDs = streamedPlan.asInstanceOf[CodegenSupport].inputRDDs()
     val buildRDDs = buildPlan.asInstanceOf[CodegenSupport].inputRDDs()
 
@@ -228,8 +230,8 @@ case class HashJoinExec(leftKeys: Seq[Expression],
         // add the build-side shuffle dependencies to first stream-side RDD
         new DelegateRDD[InternalRow](streamRDD.sparkContext, streamRDD, buildRDDs,
           preferredLocations, streamRDD.dependencies ++ buildShuffleDeps) +:
-          streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
-            rdd.sparkContext, rdd, buildRDDs, preferredLocations))
+            streamRDDs.tail.map(rdd => new DelegateRDD[InternalRow](
+              rdd.sparkContext, rdd, buildRDDs, preferredLocations))
       } else {
         streamRDDs
       }
@@ -586,6 +588,7 @@ object HashedObjectCache {
       .maximumSize(50)
       .build[CacheKey, (ObjectHashSet[_], AtomicInteger)]()
 
+  // noinspection NoTailRecursionAnnotation
   @throws(classOf[IOException])
   def get[T <: AnyRef](key: CacheKey,
       callable: Callable[ObjectHashSet[T]], context: TaskContext,

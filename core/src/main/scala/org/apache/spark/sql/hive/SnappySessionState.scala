@@ -641,7 +641,7 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
   private def queryPreparations(topLevel: Boolean): Seq[Rule[SparkPlan]] =
     snappySession.contextFunctions.queryPreparations(topLevel)
 
-  protected def newQueryExecution(plan: LogicalPlan): QueryExecution = {
+  protected[sql] def newQueryExecution(plan: LogicalPlan): QueryExecution = {
     initSnappyStrategies
     new QueryExecution(snappySession, plan) {
 

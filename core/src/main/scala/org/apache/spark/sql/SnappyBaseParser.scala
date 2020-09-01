@@ -35,11 +35,13 @@ import org.apache.spark.sql.{SnappyParserConsts => Consts}
 /**
  * Base parsing facilities for all SnappyData SQL parsers.
  */
-abstract class SnappyBaseParser(session: SparkSession) extends Parser {
+abstract class SnappyBaseParser extends Parser() {
 
   protected final var caseSensitive: Boolean = _
 
   protected final var escapedStringLiterals: Boolean = _
+
+  protected final var sparkCompatible: Boolean = _
 
   protected final var quotedRegexColumnNames: Boolean = _
 
@@ -150,6 +152,10 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
         "'" + s.substring(1, s.length - 1).replace("''", "\\'") + "'"
       } else s
       if (escapedStringLiterals) str else ParserUtils.unescapeSQLString(str)
+    } |
+    test(sparkCompatible) ~
+        capture('"' ~ (noneOf("\"\\") | '\\' ~ ANY).* ~ '"') ~ ws ~> { (s: String) =>
+      if (escapedStringLiterals) s.substring(1, s.length - 1) else ParserUtils.unescapeSQLString(s)
     }
   }
 
@@ -176,6 +182,7 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     atomic(capture(Consts.alphaUnderscore ~ Consts.identifier.*)) ~ delimiter
   }
 
+  /** all unquoted identifiers which disallows reserved keywords */
   protected final def unreservedIdentifier: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     unquotedIdentifier ~> { (s: String) =>
@@ -190,7 +197,8 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
     atomic('`' ~ capture((noneOf("`") | "``"). +) ~ '`') ~ ws ~> { (s: String) =>
       if (s.indexOf("``") >= 0) s.replace("``", "`") else s
     } |
-    atomic('"' ~ capture((noneOf("\"") | "\"\""). +) ~ '"') ~ ws ~> { (s: String) =>
+    test(!sparkCompatible) ~
+        atomic('"' ~ capture((noneOf("\"") | "\"\""). +) ~ '"') ~ ws ~> { (s: String) =>
       if (s.indexOf("\"\"") >= 0) s.replace("\"\"", "\"") else s
     }
   }
@@ -337,13 +345,21 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   }
 
   /** allow for first character of unquoted identifier to be a numeric */
-  protected final def identifierExt: Rule1[String] = rule {
+  protected final def identifierExt1: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     atomic(capture(Consts.identifier. +)) ~ delimiter ~> { (s: String) =>
       val lcase = lower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
     } |
+    quotedIdentifier
+  }
+
+  /** first character of unquoted identifier can be a numeric and also allows reserved keywords */
+  protected final def identifierExt2: Rule1[String] = rule {
+    // noinspection ScalaUnnecessaryParentheses
+    atomic(capture(Consts.identifier. +)) ~ delimiter ~>
+        ((s: String) => if (caseSensitive) s else lower(s)) |
     quotedIdentifier
   }
 
@@ -358,14 +374,14 @@ abstract class SnappyBaseParser(session: SparkSession) extends Parser {
   }
 
   final def tableIdentifier: Rule1[TableIdentifier] = rule {
-    // case-sensitivity already taken care of properly by "identifier"
-    (identifierExt ~ '.' ~ ws).? ~ identifierExt ~> ((schema: Any, table: String) =>
+    // case-sensitivity already taken care of properly by "identifierExt"
+    (identifierExt1 ~ '.' ~ ws).? ~ identifierExt1 ~> ((schema: Any, table: String) =>
       TableIdentifier(table, schema.asInstanceOf[Option[String]]))
   }
 
   final def packageIdentifier: Rule1[TableIdentifier] = rule {
     // case-sensitivity already taken care of properly by "identifier"
-    (identifierExt ~ '.' ~ ws).? ~ packageIdentifierPart ~> ((schema: Any, table: String) =>
+    (identifierExt1 ~ '.' ~ ws).? ~ packageIdentifierPart ~> ((schema: Any, table: String) =>
       TableIdentifier(table, schema.asInstanceOf[Option[String]]))
   }
 
@@ -477,17 +493,21 @@ object SnappyParserConsts {
   }
 
   /**
-   * Registering a Keyword with this method marks it a non-reserved keyword.
+   * Registering a Keyword with this method marks it as non-reserved.
    * These can be interpreted as identifiers as per the parsing rules,
-   * but never interpreted as a "strictIdentifier". In other words, use
-   * "strictIdentifier" in parsing rules where there can be an ambiguity
-   * between an identifier and a non-reserved keyword.
+   * but never interpreted as a "strictIdentifier" when `isKeyword` argument is true.
+   * In other words, use "strictIdentifier" in parsing rules where there can be an ambiguity
+   * between an identifier and a non-reserved keyword (e.g. LIMIT).
    * <p>
    * Use this for all SQL keywords used by grammar that are not reserved.
+   * If the second argument `isKeyword` is false, then it can be freely
+   * used in alias names and will only be interpreted as having special meaning when used
+   * in the specific context (e.g. DEPLOY is a statement by itself at the start of SQL
+   * but can also be used as an alias anywhere).
    */
-  private[sql] def nonReservedKeyword(s: String): Keyword = {
+  private[sql] def nonReserved(s: String, isKeyword: Boolean = true): Keyword = {
     val k = new Keyword(s)
-    allKeywords.add(k.lower)
+    if (isKeyword) allKeywords.add(k.lower)
     k
   }
 
@@ -499,36 +519,23 @@ object SnappyParserConsts {
   final val ALL: Keyword = reservedKeyword("all")
   final val AND: Keyword = reservedKeyword("and")
   final val AS: Keyword = reservedKeyword("as")
-  final val ASC: Keyword = reservedKeyword("asc")
-  final val BETWEEN: Keyword = reservedKeyword("between")
-  final val BY: Keyword = reservedKeyword("by")
   final val CASE: Keyword = reservedKeyword("case")
   final val CAST: Keyword = reservedKeyword("cast")
   final val CREATE: Keyword = reservedKeyword("create")
-  final val CURRENT: Keyword = reservedKeyword("current")
-  final val CURRENT_DATE: Keyword = reservedKeyword("current_date")
-  final val CURRENT_TIMESTAMP: Keyword = reservedKeyword("current_timestamp")
-  final val DELETE: Keyword = reservedKeyword("delete")
-  final val DESC: Keyword = reservedKeyword("desc")
   final val DISTINCT: Keyword = reservedKeyword("distinct")
-  final val DROP: Keyword = reservedKeyword("drop")
   final val ELSE: Keyword = reservedKeyword("else")
   final val EXCEPT: Keyword = reservedKeyword("except")
-  final val EXISTS: Keyword = reservedKeyword("exists")
   final val FALSE: Keyword = reservedKeyword("false")
   final val FROM: Keyword = reservedKeyword("from")
-  final val FUNCTION: Keyword = reservedKeyword("function")
   final val GROUP: Keyword = reservedKeyword("group")
   final val HAVING: Keyword = reservedKeyword("having")
   final val IN: Keyword = reservedKeyword("in")
   final val INNER: Keyword = reservedKeyword("inner")
-  final val INSERT: Keyword = reservedKeyword("insert")
   final val INTERSECT: Keyword = reservedKeyword("intersect")
   final val INTO: Keyword = reservedKeyword("into")
   final val IS: Keyword = reservedKeyword("is")
   final val JOIN: Keyword = reservedKeyword("join")
   final val LEFT: Keyword = reservedKeyword("left")
-  final val LIKE: Keyword = reservedKeyword("like")
   final val NOT: Keyword = reservedKeyword("not")
   final val NULL: Keyword = reservedKeyword("null")
   final val ON: Keyword = reservedKeyword("on")
@@ -536,228 +543,233 @@ object SnappyParserConsts {
   final val ORDER: Keyword = reservedKeyword("order")
   final val OUTER: Keyword = reservedKeyword("outer")
   final val RIGHT: Keyword = reservedKeyword("right")
-  final val SCHEMA: Keyword = reservedKeyword("schema")
   final val SELECT: Keyword = reservedKeyword("select")
-  final val SET: Keyword = reservedKeyword("set")
   final val TABLE: Keyword = reservedKeyword("table")
   final val THEN: Keyword = reservedKeyword("then")
   final val TO: Keyword = reservedKeyword("to")
   final val TRUE: Keyword = reservedKeyword("true")
   final val UNION: Keyword = reservedKeyword("union")
-  final val UPDATE: Keyword = reservedKeyword("update")
+  final val USING: Keyword = reservedKeyword("using")
   final val WHEN: Keyword = reservedKeyword("when")
   final val WHERE: Keyword = reservedKeyword("where")
   final val WITH: Keyword = reservedKeyword("with")
 
-  // marked as internal keywords to prevent use in SQL
+  // marked as internal keywords as reserved to prevent use in SQL
   final val HIVE_METASTORE: Keyword = reservedKeyword(SystemProperties.SNAPPY_HIVE_METASTORE)
-  final val SAMPLER_WEIGHTAGE: Keyword = nonReservedKeyword(Utils.WEIGHTAGE_COLUMN_NAME)
+  final val SAMPLER_WEIGHTAGE: Keyword = reservedKeyword(Utils.WEIGHTAGE_COLUMN_NAME)
 
-  // non-reserved keywords
-  final val ADD: Keyword = nonReservedKeyword("add")
-  final val ALTER: Keyword = nonReservedKeyword("alter")
-  final val ANTI: Keyword = nonReservedKeyword("anti")
-  final val AUTHORIZATION: Keyword = nonReservedKeyword("authorization")
-  final val CALL: Keyword = nonReservedKeyword("call")
-  final val CLEAR: Keyword = nonReservedKeyword("clear")
-  final val COLUMN: Keyword = nonReservedKeyword("column")
-  final val COMMENT: Keyword = nonReservedKeyword("comment")
-  final val CROSS: Keyword = nonReservedKeyword("cross")
-  final val CURRENT_USER: Keyword = nonReservedKeyword("current_user")
-  final val DESCRIBE: Keyword = nonReservedKeyword("describe")
-  final val DISABLE: Keyword = nonReservedKeyword("disable")
-  final val DISTRIBUTE: Keyword = nonReservedKeyword("distribute")
-  final val ENABLE: Keyword = nonReservedKeyword("enable")
-  final val END: Keyword = nonReservedKeyword("end")
-  final val EXECUTE: Keyword = nonReservedKeyword("execute")
-  final val EXPLAIN: Keyword = nonReservedKeyword("explain")
-  final val EXTENDED: Keyword = nonReservedKeyword("extended")
-  final val EXTERNAL: Keyword = nonReservedKeyword("external")
-  final val FETCH: Keyword = nonReservedKeyword("fetch")
-  final val FIRST: Keyword = nonReservedKeyword("first")
-  final val FN: Keyword = nonReservedKeyword("fn")
-  final val FOR: Keyword = nonReservedKeyword("for")
-  final val FULL: Keyword = nonReservedKeyword("full")
-  final val FUNCTIONS: Keyword = nonReservedKeyword("functions")
-  final val GRANT: Keyword = nonReservedKeyword("grant")
-  final val IF: Keyword = nonReservedKeyword("if")
-  final val INDEX: Keyword = nonReservedKeyword("index")
-  final val INTERVAL: Keyword = nonReservedKeyword("interval")
-  final val LAST: Keyword = nonReservedKeyword("last")
-  final val LIMIT: Keyword = nonReservedKeyword("limit")
-  final val MINUS: Keyword = nonReservedKeyword("minus")
-  final val NATURAL: Keyword = nonReservedKeyword("natural")
-  final val NULLS: Keyword = nonReservedKeyword("nulls")
-  final val ONLY: Keyword = nonReservedKeyword("only")
-  final val OPTIONS: Keyword = nonReservedKeyword("options")
-  final val OVERWRITE: Keyword = nonReservedKeyword("overwrite")
-  final val REGEXP: Keyword = nonReservedKeyword("regexp")
-  final val RENAME: Keyword = nonReservedKeyword("rename")
-  final val REPLACE: Keyword = nonReservedKeyword("replace")
-  final val REVOKE: Keyword = nonReservedKeyword("revoke")
-  final val RESET: Keyword = nonReservedKeyword("reset")
-  final val RESTRICT: Keyword = nonReservedKeyword("restrict")
-  final val RLIKE: Keyword = nonReservedKeyword("rlike")
-  final val SCHEMAS: Keyword = nonReservedKeyword("schemas")
-  final val SEMI: Keyword = nonReservedKeyword("semi")
-  final val SHOW: Keyword = nonReservedKeyword("show")
-  final val SORT: Keyword = nonReservedKeyword("sort")
-  final val START: Keyword = nonReservedKeyword("start")
-  final val STOP: Keyword = nonReservedKeyword("stop")
-  final val TABLES: Keyword = nonReservedKeyword("tables")
-  final val TEMPORARY: Keyword = nonReservedKeyword("temporary")
-  final val TRUNCATE: Keyword = nonReservedKeyword("truncate")
-  final val USE: Keyword = nonReservedKeyword("use")
-  final val USER: Keyword = nonReservedKeyword("user")
-  final val USING: Keyword = nonReservedKeyword("using")
-  final val VALUES: Keyword = nonReservedKeyword("values")
-  final val VIEW: Keyword = nonReservedKeyword("view")
-  final val VIEWS: Keyword = nonReservedKeyword("views")
+  // non-reserved keywords that can be freely used in alias names
+  final val ADD: Keyword = nonReserved("add")
+  final val ALTER: Keyword = nonReserved("alter")
+  final val ANALYZE: Keyword = nonReserved("analyze", isKeyword = false)
+  final val ANTI: Keyword = nonReserved("anti")
+  final val ASC: Keyword = nonReserved("asc")
+  final val AUTHORIZATION: Keyword = nonReserved("authorization")
+  final val BETWEEN: Keyword = nonReserved("between")
+  final val BOTH: Keyword = nonReserved("both", isKeyword = false)
+  final val BUCKETS: Keyword = nonReserved("buckets", isKeyword = false)
+  final val BY: Keyword = nonReserved("by")
+  final val CACHE: Keyword = nonReserved("cache", isKeyword = false)
+  final val CALL: Keyword = nonReserved("call")
+  final val CASCADE: Keyword = nonReserved("cascade", isKeyword = false)
+  final val CHANGE: Keyword = nonReserved("change", isKeyword = false)
+  final val CHECK: Keyword = nonReserved("check", isKeyword = false)
+  final val CLEAR: Keyword = nonReserved("clear")
+  final val CLUSTER: Keyword = nonReserved("cluster", isKeyword = false)
+  final val CLUSTERED: Keyword = nonReserved("clustered", isKeyword = false)
+  final val CODEGEN: Keyword = nonReserved("codegen", isKeyword = false)
+  final val COLUMN: Keyword = nonReserved("column")
+  final val COLUMNS: Keyword = nonReserved("columns", isKeyword = false)
+  final val COMMENT: Keyword = nonReserved("comment")
+  final val COMPUTE: Keyword = nonReserved("compute", isKeyword = false)
+  final val CONSTRAINT: Keyword = nonReserved("constraint", isKeyword = false)
+  final val COST: Keyword = nonReserved("cost", isKeyword = false)
+  final val CROSS: Keyword = nonReserved("cross")
+  final val CUBE: Keyword = nonReserved("cube")
+  final val CURRENT: Keyword = nonReserved("current")
+  final val CURRENT_DATE: Keyword = nonReserved("current_date")
+  final val CURRENT_TIMESTAMP: Keyword = nonReserved("current_timestamp")
+  final val CURRENT_USER: Keyword = nonReserved("current_user")
+  final val DATABASE: Keyword = nonReserved("database", isKeyword = false)
+  final val DATABASES: Keyword = nonReserved("databases", isKeyword = false)
+  final val DELETE: Keyword = nonReserved("delete")
+  final val DEPLOY: Keyword = nonReserved("deploy", isKeyword = false)
+  final val DESC: Keyword = nonReserved("desc")
+  final val DESCRIBE: Keyword = nonReserved("describe")
+  final val DIRECTORY: Keyword = nonReserved("directory", isKeyword = false)
+  final val DISABLE: Keyword = nonReserved("disable")
+  final val DISKSTORE: Keyword = nonReserved("diskstore", isKeyword = false)
+  final val DISTRIBUTE: Keyword = nonReserved("distribute")
+  final val DIV: Keyword = nonReserved("div", isKeyword = false)
+  final val DROP: Keyword = nonReserved("drop")
+  final val DURATION: Keyword = nonReserved("duration")
+  final val ENABLE: Keyword = nonReserved("enable")
+  final val END: Keyword = nonReserved("end")
+  final val EXECUTE: Keyword = nonReserved("execute")
+  final val EXISTS: Keyword = nonReserved("exists")
+  final val EXPLAIN: Keyword = nonReserved("explain")
+  final val EXTENDED: Keyword = nonReserved("extended")
+  final val EXTERNAL: Keyword = nonReserved("external")
+  final val EXTRACT: Keyword = nonReserved("extract", isKeyword = false)
+  final val FETCH: Keyword = nonReserved("fetch")
+  final val FIRST: Keyword = nonReserved("first")
+  final val FN: Keyword = nonReserved("fn")
+  final val FOLLOWING: Keyword = nonReserved("following")
+  final val FOR: Keyword = nonReserved("for")
+  final val FOREIGN: Keyword = nonReserved("foreign", isKeyword = false)
+  final val FORMAT: Keyword = nonReserved("format", isKeyword = false)
+  final val FORMATTED: Keyword = nonReserved("formatted", isKeyword = false)
+  final val FULL: Keyword = nonReserved("full")
+  final val FUNCTION: Keyword = nonReserved("function")
+  final val FUNCTIONS: Keyword = nonReserved("functions")
+  final val GLOBAL: Keyword = nonReserved("global", isKeyword = false)
+  final val GRANT: Keyword = nonReserved("grant")
+  final val GROUPING: Keyword = nonReserved("grouping")
+  final val HASH: Keyword = nonReserved("hash", isKeyword = false)
+  final val IF: Keyword = nonReserved("if")
+  final val IGNORE: Keyword = nonReserved("ignore", isKeyword = false)
+  final val INDEX: Keyword = nonReserved("index")
+  final val INIT: Keyword = nonReserved("init", isKeyword = false)
+  final val INSERT: Keyword = nonReserved("insert")
+  final val INTERVAL: Keyword = nonReserved("interval")
+  final val JAR: Keyword = nonReserved("jar", isKeyword = false)
+  final val JARS: Keyword = nonReserved("jars", isKeyword = false)
+  final val LAST: Keyword = nonReserved("last")
+  final val LATERAL: Keyword = nonReserved("lateral")
+  final val LAZY: Keyword = nonReserved("lazy", isKeyword = false)
+  final val LDAPGROUP: Keyword = nonReserved("ldapgroup", isKeyword = false)
+  final val LEADING: Keyword = nonReserved("leading", isKeyword = false)
+  final val LEVEL: Keyword = nonReserved("level", isKeyword = false)
+  final val LIKE: Keyword = nonReserved("like")
+  final val LIMIT: Keyword = nonReserved("limit")
+  final val LIST: Keyword = nonReserved("list", isKeyword = false)
+  final val LOAD: Keyword = nonReserved("load", isKeyword = false)
+  final val LOCAL: Keyword = nonReserved("local", isKeyword = false)
+  final val LOCATION: Keyword = nonReserved("location", isKeyword = false)
+  final val MEMBERS: Keyword = nonReserved("members", isKeyword = false)
+  final val MSCK: Keyword = nonReserved("msck", isKeyword = false)
+  final val NATURAL: Keyword = nonReserved("natural")
+  final val NULLS: Keyword = nonReserved("nulls")
+  final val OF: Keyword = nonReserved("of", isKeyword = false)
+  final val ONLY: Keyword = nonReserved("only")
+  final val OPTIONS: Keyword = nonReserved("options")
+  final val OUT: Keyword = nonReserved("out", isKeyword = false)
+  final val OVER: Keyword = nonReserved("over")
+  final val OVERWRITE: Keyword = nonReserved("overwrite")
+  final val PACKAGE: Keyword = nonReserved("package", isKeyword = false)
+  final val PACKAGES: Keyword = nonReserved("packages", isKeyword = false)
+  final val PATH: Keyword = nonReserved("path", isKeyword = false)
+  final val PARTITION: Keyword = nonReserved("partition", isKeyword = false)
+  final val PARTITIONED: Keyword = nonReserved("partitioned", isKeyword = false)
+  final val PERCENT: Keyword = nonReserved("percent", isKeyword = false)
+  final val PIVOT: Keyword = nonReserved("pivot")
+  final val POLICY: Keyword = nonReserved("policy", isKeyword = false)
+  final val POSITION: Keyword = nonReserved("position", isKeyword = false)
+  final val PRECEDING: Keyword = nonReserved("preceding")
+  final val PRIMARY: Keyword = nonReserved("primary", isKeyword = false)
+  final val PURGE: Keyword = nonReserved("purge", isKeyword = false)
+  final val PUT: Keyword = nonReserved("put", isKeyword = false)
+  final val RANGE: Keyword = nonReserved("range")
+  final val REFRESH: Keyword = nonReserved("refresh", isKeyword = false)
+  final val REGEXP: Keyword = nonReserved("regexp")
+  final val RENAME: Keyword = nonReserved("rename")
+  final val REPLACE: Keyword = nonReserved("replace")
+  final val REPOS: Keyword = nonReserved("repos", isKeyword = false)
+  final val REVOKE: Keyword = nonReserved("revoke")
+  final val RESET: Keyword = nonReserved("reset")
+  final val RESTRICT: Keyword = nonReserved("restrict")
+  final val RETURNS: Keyword = nonReserved("returns", isKeyword = false)
+  final val RLIKE: Keyword = nonReserved("rlike")
+  final val ROLLUP: Keyword = nonReserved("rollup")
+  final val ROW: Keyword = nonReserved("row")
+  final val ROWS: Keyword = nonReserved("rows")
+  final val SCHEMA: Keyword = nonReserved("schema")
+  final val SCHEMAS: Keyword = nonReserved("schemas")
+  final val SECURITY: Keyword = nonReserved("security", isKeyword = false)
+  final val SEMI: Keyword = nonReserved("semi")
+  final val SERDE: Keyword = nonReserved("serde", isKeyword = false)
+  final val SERDEPROPERTIES: Keyword = nonReserved("serdeproperties", isKeyword = false)
+  final val SET: Keyword = nonReserved("set")
+  final val SETMINUS: Keyword = nonReserved("minus")
+  final val SETS: Keyword = nonReserved("sets")
+  final val SHOW: Keyword = nonReserved("show")
+  final val SKEWED: Keyword = nonReserved("skewed", isKeyword = false)
+  final val SLIDE: Keyword = nonReserved("slide")
+  final val SORT: Keyword = nonReserved("sort")
+  final val SORTED: Keyword = nonReserved("sorted", isKeyword = false)
+  final val STATISTICS: Keyword = nonReserved("statistics", isKeyword = false)
+  final val START: Keyword = nonReserved("start")
+  final val STOP: Keyword = nonReserved("stop")
+  final val STORED: Keyword = nonReserved("stored", isKeyword = false)
+  final val STREAM: Keyword = nonReserved("stream", isKeyword = false)
+  final val STREAMING: Keyword = nonReserved("streaming", isKeyword = false)
+  final val TABLES: Keyword = nonReserved("tables")
+  final val TABLESAMPLE: Keyword = nonReserved("tablesample", isKeyword = false)
+  final val TBLPROPERTIES: Keyword = nonReserved("tblproperties", isKeyword = false)
+  final val TEMP: Keyword = nonReserved("temp", isKeyword = false)
+  final val TEMPORARY: Keyword = nonReserved("temporary")
+  final val TRAILING: Keyword = nonReserved("trailing", isKeyword = false)
+  final val TRIGGER: Keyword = nonReserved("trigger", isKeyword = false)
+  final val TRIM: Keyword = nonReserved("trim", isKeyword = false)
+  final val TRUNCATE: Keyword = nonReserved("truncate")
+  final val UNBOUNDED: Keyword = nonReserved("unbounded")
+  final val UNCACHE: Keyword = nonReserved("uncache", isKeyword = false)
+  final val UNDEPLOY: Keyword = nonReserved("undeploy", isKeyword = false)
+  final val UNIQUE: Keyword = nonReserved("unique", isKeyword = false)
+  final val UNSET: Keyword = nonReserved("unset", isKeyword = false)
+  final val UPDATE: Keyword = nonReserved("update")
+  final val USE: Keyword = nonReserved("use")
+  final val USER: Keyword = nonReserved("user")
+  final val VALUES: Keyword = nonReserved("values")
+  final val VIEW: Keyword = nonReserved("view")
+  final val VIEWS: Keyword = nonReserved("views")
+  final val WINDOW: Keyword = nonReserved("window")
 
-  // Window analytical functions are non-reserved
-  final val DURATION: Keyword = nonReservedKeyword("duration")
-  final val FOLLOWING: Keyword = nonReservedKeyword("following")
-  final val OVER: Keyword = nonReservedKeyword("over")
-  final val PRECEDING: Keyword = nonReservedKeyword("preceding")
-  final val RANGE: Keyword = nonReservedKeyword("range")
-  final val ROW: Keyword = nonReservedKeyword("row")
-  final val ROWS: Keyword = nonReservedKeyword("rows")
-  final val SLIDE: Keyword = nonReservedKeyword("slide")
-  final val UNBOUNDED: Keyword = nonReservedKeyword("unbounded")
-  final val WINDOW: Keyword = nonReservedKeyword("window")
-
-  // interval units are neither reserved nor non-reserved and can be freely
-  // used as named strictIdentifier
-  final val DAY: Keyword = new Keyword("day")
-  final val HOUR: Keyword = new Keyword("hour")
-  final val MICROSECOND: Keyword = new Keyword("microsecond")
-  final val MILLISECOND: Keyword = new Keyword("millisecond")
-  final val MINUTE: Keyword = new Keyword("minute")
-  final val MONTH: Keyword = new Keyword("month")
-  final val SECOND: Keyword = new Keyword("second")
-  final val WEEK: Keyword = new Keyword("week")
-  final val YEAR: Keyword = new Keyword("year")
-
-  // cube, rollup, grouping sets etc are not reserved
-  final val CUBE: Keyword = nonReservedKeyword("cube")
-  final val ROLLUP: Keyword = nonReservedKeyword("rollup")
-  final val GROUPING: Keyword = nonReservedKeyword("grouping")
-  final val SETS: Keyword = nonReservedKeyword("sets")
-  final val LATERAL: Keyword = nonReservedKeyword("lateral")
-  final val PIVOT: Keyword = nonReservedKeyword("pivot")
+  // interval units are not reserved and can be freely used in `strictIdentifier`
+  final val DAY: Keyword = nonReserved("day", isKeyword = false)
+  final val HOUR: Keyword = nonReserved("hour", isKeyword = false)
+  final val MICROSECOND: Keyword = nonReserved("microsecond", isKeyword = false)
+  final val MILLISECOND: Keyword = nonReserved("millisecond", isKeyword = false)
+  final val MINUTE: Keyword = nonReserved("minute", isKeyword = false)
+  final val MONTH: Keyword = nonReserved("month", isKeyword = false)
+  final val SECOND: Keyword = nonReserved("second", isKeyword = false)
+  final val WEEK: Keyword = nonReserved("week", isKeyword = false)
+  final val YEAR: Keyword = nonReserved("year", isKeyword = false)
 
   // datatypes are not reserved
-  final val ARRAY: Keyword = nonReservedKeyword("array")
-  final val BIGINT: Keyword = nonReservedKeyword("bigint")
-  final val BINARY: Keyword = nonReservedKeyword("binary")
-  final val BLOB: Keyword = nonReservedKeyword("blob")
-  final val BOOLEAN: Keyword = nonReservedKeyword("boolean")
-  final val BYTE: Keyword = nonReservedKeyword("byte")
-  final val CHAR: Keyword = nonReservedKeyword("char")
-  final val CLOB: Keyword = nonReservedKeyword("clob")
-  final val DATE: Keyword = nonReservedKeyword("date")
-  final val DECIMAL: Keyword = nonReservedKeyword("decimal")
-  final val DOUBLE: Keyword = nonReservedKeyword("double")
-  final val FLOAT: Keyword = nonReservedKeyword("float")
-  final val INT: Keyword = nonReservedKeyword("int")
-  final val INTEGER: Keyword = nonReservedKeyword("integer")
-  final val LONG: Keyword = nonReservedKeyword("long")
-  final val MAP: Keyword = nonReservedKeyword("map")
-  final val NUMERIC: Keyword = nonReservedKeyword("numeric")
-  final val PRECISION: Keyword = nonReservedKeyword("precision")
-  final val REAL: Keyword = nonReservedKeyword("real")
-  final val SHORT: Keyword = nonReservedKeyword("short")
-  final val SMALLINT: Keyword = nonReservedKeyword("smallint")
-  final val STRING: Keyword = nonReservedKeyword("string")
-  final val STRUCT: Keyword = nonReservedKeyword("struct")
-  final val TIMESTAMP: Keyword = nonReservedKeyword("timestamp")
-  final val TINYINT: Keyword = nonReservedKeyword("tinyint")
-  final val VARBINARY: Keyword = nonReservedKeyword("varbinary")
-  final val VARCHAR: Keyword = nonReservedKeyword("varchar")
+  final val ARRAY: Keyword = nonReserved("array")
+  final val BIGINT: Keyword = nonReserved("bigint")
+  final val BINARY: Keyword = nonReserved("binary")
+  final val BLOB: Keyword = nonReserved("blob")
+  final val BOOLEAN: Keyword = nonReserved("boolean")
+  final val BYTE: Keyword = nonReserved("byte")
+  final val CHAR: Keyword = nonReserved("char")
+  final val CLOB: Keyword = nonReserved("clob")
+  final val DATE: Keyword = nonReserved("date")
+  final val DECIMAL: Keyword = nonReserved("decimal")
+  final val DOUBLE: Keyword = nonReserved("double")
+  final val FLOAT: Keyword = nonReserved("float")
+  final val INT: Keyword = nonReserved("int")
+  final val INTEGER: Keyword = nonReserved("integer")
+  final val LONG: Keyword = nonReserved("long")
+  final val MAP: Keyword = nonReserved("map")
+  final val NUMERIC: Keyword = nonReserved("numeric")
+  final val PRECISION: Keyword = nonReserved("precision")
+  final val REAL: Keyword = nonReserved("real")
+  final val SHORT: Keyword = nonReserved("short")
+  final val SMALLINT: Keyword = nonReserved("smallint")
+  final val STRING: Keyword = nonReserved("string")
+  final val STRUCT: Keyword = nonReserved("struct")
+  final val TIMESTAMP: Keyword = nonReserved("timestamp")
+  final val TINYINT: Keyword = nonReserved("tinyint")
+  final val VARBINARY: Keyword = nonReserved("varbinary")
+  final val VARCHAR: Keyword = nonReserved("varchar")
 
   // for AQP
-  final val ERROR: Keyword = nonReservedKeyword("error")
-  final val ESTIMATE: Keyword = nonReservedKeyword("estimate")
-  final val CONFIDENCE: Keyword = nonReservedKeyword("confidence")
-  final val BEHAVIOR: Keyword = nonReservedKeyword("behavior")
-  final val SAMPLE: Keyword = nonReservedKeyword("sample")
-  final val TOPK: Keyword = nonReservedKeyword("topk")
-
-  // keywords that are neither reserved nor non-reserved and can be freely
-  // used as named strictIdentifier
-  final val ANALYZE: Keyword = new Keyword("analyze")
-  final val BOTH: Keyword = new Keyword("both")
-  final val BUCKETS: Keyword = new Keyword("buckets")
-  final val CACHE: Keyword = new Keyword("cache")
-  final val CASCADE: Keyword = new Keyword("cascade")
-  final val CHANGE: Keyword = new Keyword("change")
-  final val CHECK: Keyword = new Keyword("check")
-  final val CONSTRAINT: Keyword = new Keyword("constraint")
-  final val CLUSTER: Keyword = new Keyword("cluster")
-  final val CLUSTERED: Keyword = new Keyword("clustered")
-  final val CODEGEN: Keyword = new Keyword("codegen")
-  final val COLUMNS: Keyword = new Keyword("columns")
-  final val COMPUTE: Keyword = new Keyword("compute")
-  final val COST: Keyword = new Keyword("cost")
-  final val DATABASE: Keyword = new Keyword("database")
-  final val DATABASES: Keyword = new Keyword("databases")
-  final val DEPLOY: Keyword = new Keyword("deploy")
-  final val DIRECTORY: Keyword = new Keyword("directory")
-  final val DISKSTORE: Keyword = new Keyword("diskstore")
-  final val DIV: Keyword = new Keyword("div")
-  final val EXTRACT: Keyword = nonReservedKeyword("extract")
-  final val FOREIGN: Keyword = new Keyword("foreign")
-  final val FORMAT: Keyword = new Keyword("format")
-  final val FORMATTED: Keyword = new Keyword("formatted")
-  final val GLOBAL: Keyword = new Keyword("global")
-  final val HASH: Keyword = new Keyword("hash")
-  final val IGNORE: Keyword = nonReservedKeyword("ignore")
-  final val INIT: Keyword = new Keyword("init")
-  final val JAR: Keyword = new Keyword("jar")
-  final val JARS: Keyword = new Keyword("jars")
-  final val LAZY: Keyword = new Keyword("lazy")
-  final val LDAPGROUP: Keyword = new Keyword("ldapgroup")
-  final val LEADING: Keyword = new Keyword("leading")
-  final val LEVEL: Keyword = new Keyword("level")
-  final val LIST: Keyword = new Keyword("list")
-  final val LOAD: Keyword = new Keyword("load")
-  final val LOCAL: Keyword = new Keyword("local")
-  final val LOCATION: Keyword = new Keyword("location")
-  final val MEMBERS: Keyword = new Keyword("members")
-  final val MSCK: Keyword = new Keyword("msck")
-  final val OF: Keyword = new Keyword("of")
-  final val OUT: Keyword = new Keyword("out")
-  final val PACKAGE: Keyword = new Keyword("package")
-  final val PACKAGES: Keyword = new Keyword("packages")
-  final val PATH: Keyword = new Keyword("path")
-  final val PARTITION: Keyword = new Keyword("partition")
-  final val PARTITIONED: Keyword = new Keyword("partitioned")
-  final val PERCENT: Keyword = new Keyword("percent")
-  final val POLICY: Keyword = new Keyword("policy")
-  final val POSITION: Keyword = new Keyword("position")
-  final val PRIMARY: Keyword = new Keyword("primary")
-  final val PURGE: Keyword = new Keyword("purge")
-  final val PUT: Keyword = new Keyword("put")
-  final val REFRESH: Keyword = new Keyword("refresh")
-  final val REPOS: Keyword = new Keyword("repos")
-  final val RETURNS: Keyword = new Keyword("returns")
-  final val SECURITY: Keyword = new Keyword("security")
-  final val SERDE: Keyword = new Keyword("serde")
-  final val SERDEPROPERTIES: Keyword = new Keyword("serdeproperties")
-  final val SKEWED: Keyword = new Keyword("skewed")
-  final val SORTED: Keyword = new Keyword("sorted")
-  final val STATISTICS: Keyword = new Keyword("statistics")
-  final val STORED: Keyword = nonReservedKeyword("stored")
-  final val STREAM: Keyword = new Keyword("stream")
-  final val STREAMING: Keyword = new Keyword("streaming")
-  final val TABLESAMPLE: Keyword = new Keyword("tablesample")
-  final val TBLPROPERTIES: Keyword = new Keyword("tblproperties")
-  final val TEMP: Keyword = new Keyword("temp")
-  final val TRAILING: Keyword = new Keyword("trailing")
-  final val TRIGGER: Keyword = new Keyword("trigger")
-  final val TRIM: Keyword = new Keyword("trim")
-  final val UNCACHE: Keyword = new Keyword("uncache")
-  final val UNDEPLOY: Keyword = new Keyword("undeploy")
-  final val UNIQUE: Keyword = new Keyword("unique")
-  final val UNSET: Keyword = new Keyword("unset")
+  final val ERROR: Keyword = nonReserved("error")
+  final val ESTIMATE: Keyword = nonReserved("estimate")
+  final val CONFIDENCE: Keyword = nonReserved("confidence")
+  final val BEHAVIOR: Keyword = nonReserved("behavior")
+  final val SAMPLE: Keyword = nonReserved("sample")
+  final val TOPK: Keyword = nonReserved("topk")
 }

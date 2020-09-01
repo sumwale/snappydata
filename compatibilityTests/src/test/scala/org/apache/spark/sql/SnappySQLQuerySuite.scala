@@ -47,6 +47,11 @@ class SnappySQLQuerySuite extends SQLQuerySuite with
     "SPARK-16644: Aggregate should not put aggregate expressions to constraints"
   )
 
+  /**
+   * override to ensure that SnappyHashAggregateExec is present rather than Spark's
+   * HashAggregateExec; does not include the loose className.contains check in base class
+   * to force check the presence of SnappyHashAggregateExec
+   */
   override protected def testCodeGen(sqlText: String, expectedResults: Seq[Row]): Unit = {
     val df = sql(sqlText)
     // First, check if we have GeneratedAggregate.

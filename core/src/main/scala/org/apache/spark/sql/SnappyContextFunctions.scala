@@ -32,7 +32,7 @@ import org.apache.spark.sql.execution.closedform.{ClosedFormStats, ErrorAggregat
 import org.apache.spark.sql.execution.common.HAC
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange}
 import org.apache.spark.sql.execution.{CollapseCodegenStages, PlanLater, QueryExecution, ReuseSubquery, SparkPlan, TopK}
-import org.apache.spark.sql.hive.{OptimizeSortAndFilePlans, SnappyAnalyzer}
+import org.apache.spark.sql.hive.{OptimizeSortAndFilePlans, SnappyAnalyzer, SnappySessionState}
 import org.apache.spark.sql.internal.{BypassRowLevelSecurity, MarkerForCreateTableAsSelect}
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.streaming.StreamBaseRelation
@@ -59,9 +59,9 @@ class SnappyContextFunctions(val session: SnappySession) extends SparkSupport {
 
   def postRelationCreation(relation: Option[BaseRelation]): Unit = {}
 
-  def registerSnappyFunctions(): Unit = {
+  def registerSnappyFunctions(sessionState: SnappySessionState): Unit = {
     SnappyDataFunctions.builtin.foreach(
-      fn => internals.registerFunction(session, fn._1, fn._2, fn._3))
+      fn => internals.registerFunction(sessionState, fn._1, fn._2, fn._3))
   }
 
   private def missingAQPException(): AnalysisException =

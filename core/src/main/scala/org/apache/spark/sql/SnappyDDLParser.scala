@@ -23,7 +23,7 @@ import scala.util.Try
 
 import com.pivotal.gemfirexd.internal.iapi.util.IdUtil
 import io.snappydata.sql.catalog.{CatalogObjectType, SnappyExternalCatalog}
-import io.snappydata.{Constant, Property, QueryHint}
+import io.snappydata.{Constant, QueryHint}
 import org.parboiled2._
 import shapeless.{::, HNil}
 
@@ -45,73 +45,62 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.{SnappyParserConsts => Consts}
 import org.apache.spark.streaming._
 
-abstract class SnappyDDLParser(session: SnappySession)
-    extends SnappyBaseParser(session) with SparkSupport {
+abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser with SparkSupport {
 
   // reserved keywords
   final def ALL: Rule0 = rule { keyword(Consts.ALL) }
   final def AND: Rule0 = rule { keyword(Consts.AND) }
   final def AS: Rule0 = rule { keyword(Consts.AS) }
-  final def ASC: Rule0 = rule { keyword(Consts.ASC) }
-  final def BETWEEN: Rule0 = rule { keyword(Consts.BETWEEN) }
-  final def BY: Rule0 = rule { keyword(Consts.BY) }
   final def CASE: Rule0 = rule { keyword(Consts.CASE) }
   final def CAST: Rule0 = rule { keyword(Consts.CAST) }
   final def CREATE: Rule0 = rule { keyword(Consts.CREATE) }
-  final def CURRENT: Rule0 = rule { keyword(Consts.CURRENT) }
-  final def CURRENT_DATE: Rule0 = rule { keyword(Consts.CURRENT_DATE) }
-  final def CURRENT_TIMESTAMP: Rule0 = rule { keyword(Consts.CURRENT_TIMESTAMP) }
-  final def DELETE: Rule0 = rule { keyword(Consts.DELETE) }
-  final def DESC: Rule0 = rule { keyword(Consts.DESC) }
+  final def CROSS: Rule0 = rule { keyword(Consts.CROSS) }
   final def DISTINCT: Rule0 = rule { keyword(Consts.DISTINCT) }
-  final def DROP: Rule0 = rule { keyword(Consts.DROP) }
   final def ELSE: Rule0 = rule { keyword(Consts.ELSE) }
+  final def END: Rule0 = rule { keyword(Consts.END) }
   final def EXCEPT: Rule0 = rule { keyword(Consts.EXCEPT) }
   final def EXISTS: Rule0 = rule { keyword(Consts.EXISTS) }
   final def FALSE: Rule0 = rule { keyword(Consts.FALSE) }
   final def FROM: Rule0 = rule { keyword(Consts.FROM) }
-  final def GRANT: Rule0 = rule { keyword(Consts.GRANT) }
   final def GROUP: Rule0 = rule { keyword(Consts.GROUP) }
   final def HAVING: Rule0 = rule { keyword(Consts.HAVING) }
   final def IN: Rule0 = rule { keyword(Consts.IN) }
   final def INNER: Rule0 = rule { keyword(Consts.INNER) }
-  final def INSERT: Rule0 = rule { keyword(Consts.INSERT) }
   final def INTERSECT: Rule0 = rule { keyword(Consts.INTERSECT) }
   final def INTO: Rule0 = rule { keyword(Consts.INTO) }
   final def IS: Rule0 = rule { keyword(Consts.IS) }
   final def JOIN: Rule0 = rule { keyword(Consts.JOIN) }
   final def LEFT: Rule0 = rule { keyword(Consts.LEFT) }
-  final def LIKE: Rule0 = rule { keyword(Consts.LIKE) }
+  final def NATURAL: Rule0 = rule { keyword(Consts.NATURAL) }
   final def NOT: Rule0 = rule { keyword(Consts.NOT) }
   final def NULL: Rule0 = rule { keyword(Consts.NULL) }
   final def ON: Rule0 = rule { keyword(Consts.ON) }
   final def OR: Rule0 = rule { keyword(Consts.OR) }
   final def ORDER: Rule0 = rule { keyword(Consts.ORDER) }
   final def OUTER: Rule0 = rule { keyword(Consts.OUTER) }
-  final def REVOKE: Rule0 = rule { keyword(Consts.REVOKE) }
   final def RIGHT: Rule0 = rule { keyword(Consts.RIGHT) }
-  final def SCHEMA: Rule0 = rule { keyword(Consts.SCHEMA) }
   final def SELECT: Rule0 = rule { keyword(Consts.SELECT) }
-  final def SET: Rule0 = rule { keyword(Consts.SET) }
   final def TABLE: Rule0 = rule { keyword(Consts.TABLE) }
   final def THEN: Rule0 = rule { keyword(Consts.THEN) }
   final def TO: Rule0 = rule { keyword(Consts.TO) }
   final def TRUE: Rule0 = rule { keyword(Consts.TRUE) }
   final def UNION: Rule0 = rule { keyword(Consts.UNION) }
-  final def UPDATE: Rule0 = rule { keyword(Consts.UPDATE) }
+  final def USING: Rule0 = rule { keyword(Consts.USING) }
   final def WHEN: Rule0 = rule { keyword(Consts.WHEN) }
   final def WHERE: Rule0 = rule { keyword(Consts.WHERE) }
   final def WITH: Rule0 = rule { keyword(Consts.WITH) }
-  final def USER: Rule0 = rule { keyword(Consts.USER) }
 
   // non-reserved keywords
   final def ADD: Rule0 = rule { keyword(Consts.ADD) }
   final def ALTER: Rule0 = rule { keyword(Consts.ALTER) }
   final def ANALYZE: Rule0 = rule { keyword(Consts.ANALYZE) }
   final def ANTI: Rule0 = rule { keyword(Consts.ANTI) }
+  final def ASC: Rule0 = rule { keyword(Consts.ASC) }
   final def AUTHORIZATION: Rule0 = rule { keyword(Consts.AUTHORIZATION) }
+  final def BETWEEN: Rule0 = rule { keyword(Consts.BETWEEN) }
   final def BOTH: Rule0 = rule { keyword(Consts.BOTH) }
   final def BUCKETS: Rule0 = rule { keyword(Consts.BUCKETS) }
+  final def BY: Rule0 = rule { keyword(Consts.BY) }
   final def CACHE: Rule0 = rule { keyword(Consts.CACHE) }
   final def CALL: Rule0 = rule{ keyword(Consts.CALL) }
   final def CASCADE: Rule0 = rule { keyword(Consts.CASCADE) }
@@ -127,19 +116,25 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def COMPUTE: Rule0 = rule { keyword(Consts.COMPUTE) }
   final def CONSTRAINT: Rule0 = rule { keyword(Consts.CONSTRAINT) }
   final def COST: Rule0 = rule { keyword(Consts.COST) }
-  final def CROSS: Rule0 = rule { keyword(Consts.CROSS) }
+  final def CUBE: Rule0 = rule { keyword(Consts.CUBE) }
+  final def CURRENT: Rule0 = rule { keyword(Consts.CURRENT) }
+  final def CURRENT_DATE: Rule0 = rule { keyword(Consts.CURRENT_DATE) }
+  final def CURRENT_TIMESTAMP: Rule0 = rule { keyword(Consts.CURRENT_TIMESTAMP) }
   final def CURRENT_USER: Rule0 = rule { keyword(Consts.CURRENT_USER) }
-  final def DEPLOY: Rule0 = rule { keyword(Consts.DEPLOY) }
   final def DATABASE: Rule0 = rule { keyword(Consts.DATABASE) }
   final def DATABASES: Rule0 = rule { keyword(Consts.DATABASES) }
+  final def DELETE: Rule0 = rule { keyword(Consts.DELETE) }
+  final def DEPLOY: Rule0 = rule { keyword(Consts.DEPLOY) }
+  final def DESC: Rule0 = rule { keyword(Consts.DESC) }
   final def DESCRIBE: Rule0 = rule { keyword(Consts.DESCRIBE) }
   final def DIRECTORY: Rule0 = rule { keyword(Consts.DIRECTORY) }
   final def DISABLE: Rule0 = rule { keyword(Consts.DISABLE) }
   final def DISTRIBUTE: Rule0 = rule { keyword(Consts.DISTRIBUTE) }
   final def DISKSTORE: Rule0 = rule { keyword(Consts.DISKSTORE) }
   final def DIV: Rule0 = rule { keyword(Consts.DIV) }
+  final def DROP: Rule0 = rule { keyword(Consts.DROP) }
+  final def DURATION: Rule0 = rule { keyword(Consts.DURATION) }
   final def ENABLE: Rule0 = rule { keyword(Consts.ENABLE) }
-  final def END: Rule0 = rule { keyword(Consts.END) }
   final def EXECUTE: Rule0 = rule { keyword(Consts.EXECUTE) }
   final def EXPLAIN: Rule0 = rule { keyword(Consts.EXPLAIN) }
   final def EXTENDED: Rule0 = rule { keyword(Consts.EXTENDED) }
@@ -148,6 +143,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def FETCH: Rule0 = rule { keyword(Consts.FETCH) }
   final def FIRST: Rule0 = rule { keyword(Consts.FIRST) }
   final def FN: Rule0 = rule { keyword(Consts.FN) }
+  final def FOLLOWING: Rule0 = rule { keyword(Consts.FOLLOWING) }
   final def FOR: Rule0 = rule { keyword(Consts.FOR) }
   final def FOREIGN: Rule0 = rule { keyword(Consts.FOREIGN) }
   final def FORMAT: Rule0 = rule { keyword(Consts.FORMAT) }
@@ -156,33 +152,38 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def FUNCTION: Rule0 = rule { keyword(Consts.FUNCTION) }
   final def FUNCTIONS: Rule0 = rule { keyword(Consts.FUNCTIONS) }
   final def GLOBAL: Rule0 = rule { keyword(Consts.GLOBAL) }
+  final def GRANT: Rule0 = rule { keyword(Consts.GRANT) }
+  final def GROUPING: Rule0 = rule { keyword(Consts.GROUPING) }
   final def HASH: Rule0 = rule { keyword(Consts.HASH) }
   final def IF: Rule0 = rule { keyword(Consts.IF) }
   final def IGNORE: Rule0 = rule { keyword(Consts.IGNORE) }
   final def INDEX: Rule0 = rule { keyword(Consts.INDEX) }
   final def INIT: Rule0 = rule { keyword(Consts.INIT) }
+  final def INSERT: Rule0 = rule { keyword(Consts.INSERT) }
   final def INTERVAL: Rule0 = rule { keyword(Consts.INTERVAL) }
   final def JAR: Rule0 = rule { keyword(Consts.JAR) }
   final def JARS: Rule0 = rule { keyword(Consts.JARS) }
   final def LAST: Rule0 = rule { keyword(Consts.LAST) }
+  final def LATERAL: Rule0 = rule { keyword(Consts.LATERAL) }
   final def LAZY: Rule0 = rule { keyword(Consts.LAZY) }
   final def LDAPGROUP: Rule0 = rule { keyword(Consts.LDAPGROUP) }
   final def LEADING: Rule0 = rule { keyword(Consts.LEADING) }
   final def LEVEL: Rule0 = rule { keyword(Consts.LEVEL) }
+  final def LIKE: Rule0 = rule { keyword(Consts.LIKE) }
   final def LIMIT: Rule0 = rule { keyword(Consts.LIMIT) }
   final def LIST: Rule0 = rule { keyword(Consts.LIST) }
   final def LOAD: Rule0 = rule { keyword(Consts.LOAD) }
   final def LOCAL: Rule0 = rule { keyword(Consts.LOCAL) }
   final def LOCATION: Rule0 = rule { keyword(Consts.LOCATION) }
   final def MEMBERS: Rule0 = rule { keyword(Consts.MEMBERS) }
-  final def MINUS: Rule0 = rule { keyword(Consts.MINUS) }
+  final def MINUS: Rule0 = rule { keyword(Consts.SETMINUS) }
   final def MSCK: Rule0 = rule { keyword(Consts.MSCK) }
-  final def NATURAL: Rule0 = rule { keyword(Consts.NATURAL) }
   final def NULLS: Rule0 = rule { keyword(Consts.NULLS) }
   final def OF: Rule0 = rule { keyword(Consts.OF) }
   final def ONLY: Rule0 = rule { keyword(Consts.ONLY) }
   final def OPTIONS: Rule0 = rule { keyword(Consts.OPTIONS) }
   final def OUT: Rule0 = rule { keyword(Consts.OUT) }
+  final def OVER: Rule0 = rule { keyword(Consts.OVER) }
   final def OVERWRITE: Rule0 = rule { keyword(Consts.OVERWRITE) }
   final def PACKAGE: Rule0 = rule { keyword(Consts.PACKAGE) }
   final def PACKAGES: Rule0 = rule { keyword(Consts.PACKAGES) }
@@ -190,11 +191,14 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def PARTITIONED: Rule0 = rule { keyword(Consts.PARTITIONED) }
   final def PATH: Rule0 = rule { keyword(Consts.PATH) }
   final def PERCENT: Rule0 = rule { keyword(Consts.PERCENT) }
+  final def PIVOT: Rule0 = rule { keyword(Consts.PIVOT) }
   final def POLICY: Rule0 = rule { keyword(Consts.POLICY) }
   final def POSITION: Rule0 = rule { keyword(Consts.POSITION) }
+  final def PRECEDING: Rule0 = rule { keyword(Consts.PRECEDING) }
   final def PRIMARY: Rule0 = rule { keyword(Consts.PRIMARY) }
   final def PURGE: Rule0 = rule { keyword(Consts.PURGE) }
   final def PUT: Rule0 = rule { keyword(Consts.PUT) }
+  final def RANGE: Rule0 = rule { keyword(Consts.RANGE) }
   final def REFRESH: Rule0 = rule { keyword(Consts.REFRESH) }
   final def REGEXP: Rule0 = rule { keyword(Consts.REGEXP) }
   final def RENAME: Rule0 = rule { keyword(Consts.RENAME) }
@@ -203,14 +207,22 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def RESET: Rule0 = rule { keyword(Consts.RESET) }
   final def RESTRICT: Rule0 = rule { keyword(Consts.RESTRICT) }
   final def RETURNS: Rule0 = rule { keyword(Consts.RETURNS) }
+  final def REVOKE: Rule0 = rule { keyword(Consts.REVOKE) }
   final def RLIKE: Rule0 = rule { keyword(Consts.RLIKE) }
+  final def ROLLUP: Rule0 = rule { keyword(Consts.ROLLUP) }
+  final def ROW: Rule0 = rule { keyword(Consts.ROW) }
+  final def ROWS: Rule0 = rule { keyword(Consts.ROWS) }
+  final def SCHEMA: Rule0 = rule { keyword(Consts.SCHEMA) }
   final def SCHEMAS: Rule0 = rule { keyword(Consts.SCHEMAS) }
   final def SECURITY: Rule0 = rule { keyword(Consts.SECURITY) }
   final def SEMI: Rule0 = rule { keyword(Consts.SEMI) }
   final def SERDE: Rule0 = rule { keyword(Consts.SERDE) }
   final def SERDEPROPERTIES: Rule0 = rule { keyword(Consts.SERDEPROPERTIES) }
+  final def SET: Rule0 = rule { keyword(Consts.SET) }
+  final def SETS: Rule0 = rule { keyword(Consts.SETS) }
   final def SHOW: Rule0 = rule { keyword(Consts.SHOW) }
   final def SKEWED: Rule0 = rule { keyword(Consts.SKEWED) }
+  final def SLIDE: Rule0 = rule { keyword(Consts.SLIDE) }
   final def SORT: Rule0 = rule { keyword(Consts.SORT) }
   final def SORTED: Rule0 = rule { keyword(Consts.SORTED) }
   final def START: Rule0 = rule { keyword(Consts.START) }
@@ -227,26 +239,17 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def TRIGGER: Rule0 = rule { keyword(Consts.TRIGGER) }
   final def TRIM: Rule0 = rule { keyword(Consts.TRIM) }
   final def TRUNCATE: Rule0 = rule { keyword(Consts.TRUNCATE) }
+  final def UNBOUNDED: Rule0 = rule { keyword(Consts.UNBOUNDED) }
   final def UNCACHE: Rule0 = rule { keyword(Consts.UNCACHE) }
   final def UNDEPLOY: Rule0 = rule { keyword(Consts.UNDEPLOY) }
   final def UNIQUE: Rule0 = rule { keyword(Consts.UNIQUE) }
   final def UNSET: Rule0 = rule { keyword(Consts.UNSET) }
+  final def UPDATE: Rule0 = rule { keyword(Consts.UPDATE) }
   final def USE: Rule0 = rule { keyword(Consts.USE) }
-  final def USING: Rule0 = rule { keyword(Consts.USING) }
+  final def USER: Rule0 = rule { keyword(Consts.USER) }
   final def VALUES: Rule0 = rule { keyword(Consts.VALUES) }
   final def VIEW: Rule0 = rule { keyword(Consts.VIEW) }
   final def VIEWS: Rule0 = rule { keyword(Consts.VIEWS) }
-
-  // Window analytical functions (non-reserved)
-  final def DURATION: Rule0 = rule { keyword(Consts.DURATION) }
-  final def FOLLOWING: Rule0 = rule { keyword(Consts.FOLLOWING) }
-  final def OVER: Rule0 = rule { keyword(Consts.OVER) }
-  final def PRECEDING: Rule0 = rule { keyword(Consts.PRECEDING) }
-  final def RANGE: Rule0 = rule { keyword(Consts.RANGE) }
-  final def ROW: Rule0 = rule { keyword(Consts.ROW) }
-  final def ROWS: Rule0 = rule { keyword(Consts.ROWS) }
-  final def SLIDE: Rule0 = rule { keyword(Consts.SLIDE) }
-  final def UNBOUNDED: Rule0 = rule { keyword(Consts.UNBOUNDED) }
   final def WINDOW: Rule0 = rule { keyword(Consts.WINDOW) }
 
   // interval units (non-reserved)
@@ -263,14 +266,6 @@ abstract class SnappyDDLParser(session: SnappySession)
   final def SECOND: Rule0 = rule { intervalUnit(Consts.SECOND) }
   final def WEEK: Rule0 = rule { intervalUnit(Consts.WEEK) }
   final def YEAR: Rule0 = rule { intervalUnit(Consts.YEAR) }
-
-  // additional analytics: cube, rollup, grouping sets, pivot etc
-  final def CUBE: Rule0 = rule { keyword(Consts.CUBE) }
-  final def ROLLUP: Rule0 = rule { keyword(Consts.ROLLUP) }
-  final def GROUPING: Rule0 = rule { keyword(Consts.GROUPING) }
-  final def SETS: Rule0 = rule { keyword(Consts.SETS) }
-  final def LATERAL: Rule0 = rule { keyword(Consts.LATERAL) }
-  final def PIVOT: Rule0 = rule { keyword(Consts.PIVOT) }
 
   /** spark parser used for hive DDLs that are not relevant to SnappyData's builtin sources */
   protected final lazy val sparkParser: SparkSqlParser =
@@ -329,8 +324,7 @@ abstract class SnappyDDLParser(session: SnappySession)
       val provider = remaining._1 match {
         case None =>
           // use hive source as default if appropriate is set else use 'row'
-          if (session.enableHiveSupport && !Property.HiveCompatibility.get(
-            session.sessionState.conf).equalsIgnoreCase("default")) {
+          if (session.enableHiveSupport && sparkCompatible) {
             DDLUtils.HIVE_PROVIDER
           } else {
             session.sessionState.conf.getConfString(SQLConf.DEFAULT_DATA_SOURCE_NAME.key,
@@ -444,7 +438,7 @@ abstract class SnappyDDLParser(session: SnappySession)
   }
 
   protected final def identifierList: Rule1[Seq[String]] = rule {
-    O_PAREN ~ (identifier + commaSep) ~ C_PAREN
+    O_PAREN ~ (identifierExt1 + commaSep) ~ C_PAREN
   }
 
   protected final def bucketSpec: Rule1[BucketSpec] = rule {
@@ -968,9 +962,9 @@ abstract class SnappyDDLParser(session: SnappySession)
   protected def column: Rule1[StructField] = rule {
     identifier ~ columnDataType ~ ((NOT ~ push(true)).? ~ NULL).? ~
         (COMMENT ~ stringLiteral).? ~> { (columnName: String,
-        t: DataType, notNull: Any, cm: Any) =>
+        dt: DataType, notNull: Any, cm: Any) =>
       val builder = new MetadataBuilder()
-      val (dataType, empty) = t match {
+      val (dataType, empty) = dt match {
         case CharType(size) =>
           builder.putLong(Constant.CHAR_TYPE_SIZE_PROP, size)
               .putString(Constant.CHAR_TYPE_BASE_PROP, "CHAR")
@@ -985,13 +979,19 @@ abstract class SnappyDDLParser(session: SnappySession)
         case StringType =>
           builder.putString(Constant.CHAR_TYPE_BASE_PROP, "STRING")
           (StringType, false)
-        case _ => (t, true)
+        case _ => (dt, true)
       }
       val metadata = cm.asInstanceOf[Option[String]] match {
         case Some(comment) => builder.putString(
           Consts.COMMENT.lower, comment).build()
         case None => if (empty) Metadata.empty else builder.build()
       }
+      // Add Hive type string to metadata
+      val cleanedDataType = HiveStringType.replaceCharType(dt)
+      if (dt != cleanedDataType) {
+        builder.putString(HIVE_TYPE_STRING, dt.catalogString)
+      }
+
       val notNullOpt = notNull.asInstanceOf[Option[Option[Boolean]]]
       StructField(columnName, dataType, notNullOpt.isEmpty ||
           notNullOpt.get.isEmpty, metadata)

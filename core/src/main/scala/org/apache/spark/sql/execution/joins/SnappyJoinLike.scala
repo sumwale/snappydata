@@ -16,6 +16,8 @@
  */
 package org.apache.spark.sql.execution.joins
 
+import scala.annotation.tailrec
+
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, ClusteredDistribution, Distribution, Partitioning, UnknownPartitioning}
@@ -147,6 +149,7 @@ trait SnappyJoinLike extends SparkPlan {
       }
     }
 
+    @tailrec
     def searchAggregate(plan: SparkPlan, result: Array[Expression]): Unit = plan match {
       // resolve if possible in this aggregate and keep searching the tree afterwards
       case a: SnappyHashAggregateExec => matchAggregate(a.output, a.resultExpressions, result)

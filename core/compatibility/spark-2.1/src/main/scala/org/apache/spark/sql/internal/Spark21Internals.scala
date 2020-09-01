@@ -21,10 +21,9 @@ import java.lang.reflect.Method
 
 import scala.util.control.NonFatal
 
-import io.snappydata.Property.HashAggregateSize
 import io.snappydata.sql.catalog.SnappyExternalCatalog
 import io.snappydata.sql.catalog.impl.SmartConnectorExternalCatalog
-import io.snappydata.{HintName, QueryHint}
+import io.snappydata.{HintName, Property, QueryHint}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.deploy.SparkSubmitUtils
@@ -84,9 +83,9 @@ class Spark21Internals(override val version: String) extends SparkInternals {
     spark.sharedState.cacheManager.uncacheQuery(spark, plan, blocking)
   }
 
-  override def registerFunction(session: SparkSession, name: FunctionIdentifier,
+  override def registerFunction(sessionState: SnappySessionState, name: FunctionIdentifier,
       info: ExpressionInfo, function: Seq[Expression] => Expression): Unit = {
-    session.sessionState.functionRegistry.registerFunction(name.unquotedString, info, function)
+    sessionState.functionRegistry.registerFunction(name.unquotedString, info, function)
   }
 
   override def addClassField(ctx: CodegenContext, javaType: String,
@@ -337,15 +336,15 @@ class Spark21Internals(override val version: String) extends SparkInternals {
     GroupingSets(bitmasks, groupByExprs, child, aggregations)
   }
 
-  override def newUnresolvedRelation(tableIdentifier: TableIdentifier,
-      alias: Option[String]): LogicalPlan = {
-    UnresolvedRelation(tableIdentifier, alias)
-  }
-
-  override def unresolvedRelationAlias(u: UnresolvedRelation): Option[String] = u.alias
-
   override def newSubqueryAlias(alias: String, child: LogicalPlan,
-      view: Option[TableIdentifier]): SubqueryAlias = SubqueryAlias(alias, child, view)
+      view: Option[TableIdentifier]): SubqueryAlias = view match {
+    case None => child match {
+      case u: UnresolvedRelation if u.alias.isEmpty =>
+        UnresolvedRelation(u.tableIdentifier, Some(alias))
+      case _ => SubqueryAlias(alias, child, view)
+    }
+    case _ => SubqueryAlias(alias, child, view)
+  }
 
   override def getViewFromAlias(q: SubqueryAlias): Option[TableIdentifier] = q.view
 
@@ -385,6 +384,10 @@ class Spark21Internals(override val version: String) extends SparkInternals {
           s"'$functionName' not supported in Spark $version")
     }
     UnresolvedTableValuedFunction(functionName, functionArgs)
+  }
+
+  override def newUnresolvedHaving(predicate: Expression, child: LogicalPlan): LogicalPlan = {
+    Filter(predicate, child)
   }
 
   private def boundaryInt(boundaryType: FrameBoundaryType.Type,
@@ -719,6 +722,8 @@ class Spark21Internals(override val version: String) extends SparkInternals {
     ExplainCommand(logicalPlan, extended = extended, codegen = codegen)
   }
 
+  override def newTruncateTableCommand(tableName: TableIdentifier): Option[RunnableCommand] = None
+
   override def cachedColumnBuffers(relation: InMemoryRelation): RDD[_] = {
     relation.cachedColumnBuffers
   }
@@ -1003,7 +1008,7 @@ class SnappySessionState21(override val snappySession: SnappySession)
     // `StatefulAggregationStrategy` which is applied by spark for streaming queries. This
     // implies that Snappydata aggregation optimisation will be turned off for any usage of
     // this session including non-streaming queries.
-    HashAggregateSize.set(snappySession.sessionState.conf, "-1")
+    Property.HashAggregateSize.set(snappySession.sessionState.conf, "-1")
     new StreamingQueryManager(snappySession)
   }
 }

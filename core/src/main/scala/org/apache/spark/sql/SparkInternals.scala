@@ -24,7 +24,7 @@ import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.internal.config.ConfigBuilder
 import org.apache.spark.rdd.{EmptyRDD, RDD}
-import org.apache.spark.sql.catalyst.analysis.{UnresolvedRelation, UnresolvedTableValuedFunction}
+import org.apache.spark.sql.catalyst.analysis.UnresolvedTableValuedFunction
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction}
@@ -94,7 +94,7 @@ trait SparkInternals extends Logging {
   /**
    * Register an inbuilt function in the session function registry.
    */
-  def registerFunction(session: SparkSession, name: FunctionIdentifier,
+  def registerFunction(sessionState: SnappySessionState, name: FunctionIdentifier,
       info: ExpressionInfo, function: Seq[Expression] => Expression): Unit
 
   /**
@@ -366,20 +366,10 @@ trait SparkInternals extends Logging {
       child: LogicalPlan, aggregations: Seq[NamedExpression]): LogicalPlan
 
   /**
-   * Create a new unresolved relation (Table/View/Alias).
-   */
-  def newUnresolvedRelation(tableIdentifier: TableIdentifier, alias: Option[String]): LogicalPlan
-
-  /**
-   * Get alias if specified in UnresolvedRelation else None.
-   */
-  def unresolvedRelationAlias(u: UnresolvedRelation): Option[String]
-
-  /**
    * Create an alias for a sub-query.
    */
   def newSubqueryAlias(alias: String, child: LogicalPlan,
-      view: Option[TableIdentifier] = None): SubqueryAlias
+      view: Option[TableIdentifier] = None): LogicalPlan
 
   /**
    * Get view, if defined, or else alias name of a SubqueryAlias.
@@ -416,6 +406,11 @@ trait SparkInternals extends Logging {
    */
   def newUnresolvedTableValuedFunction(functionName: String, functionArgs: Seq[Expression],
       outputNames: Seq[String]): UnresolvedTableValuedFunction
+
+  /**
+   * Create a new unresolved HAVING plan (is a simple Filter in Spark < 2.4).
+   */
+  def newUnresolvedHaving(predicate: Expression, child: LogicalPlan): LogicalPlan
 
   /**
    * Create a new frame boundary. This is a FrameBoundary is older Spark versions
@@ -779,6 +774,12 @@ trait SparkInternals extends Logging {
    */
   def newExplainCommand(logicalPlan: LogicalPlan, extended: Boolean,
       codegen: Boolean, cost: Boolean): LogicalPlan
+
+  /**
+   * Create a plan for TRUNCATE TABLE for non-snappy tables.
+   * Returns `None` if truncate is not supported in this version of Spark.
+   */
+  def newTruncateTableCommand(tableName: TableIdentifier): Option[RunnableCommand]
 
   /**
    * Get the internal cached RDD for an in-memory relation.

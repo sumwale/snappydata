@@ -16,6 +16,7 @@
  */
 package org.apache.spark.sql.execution
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 
 import com.gemstone.gemfire.internal.shared.ClientResolverUtils
@@ -85,7 +86,7 @@ case class ObjectHashMapAccessor(@transient session: SnappySession,
     hashMapTerm: String, dataTerm: String, maskTerm: String,
     multiMap: Boolean, @transient consumer: CodegenSupport,
     @transient cParent: CodegenSupport, override val child: SparkPlan)
-    extends UnaryExecNode with CodegenSupport with SparkSupport {
+    extends UnaryExecNode with CodegenSupportSnappy with SparkSupport {
 
   override def output: Seq[Attribute] = child.output
 
@@ -292,6 +293,10 @@ case class ObjectHashMapAccessor(@transient session: SnappySession,
 
   override protected def doProduce(ctx: CodegenContext): String =
     throw new UnsupportedOperationException("unexpected invocation")
+
+  override def needCopyResult: Boolean = false
+
+  override def needStopCheck: Boolean = true
 
   private def doConsume(ctx: CodegenContext, keyExpressions: Seq[Expression],
       valueExpressions: Seq[Expression], input: Seq[ExprCode]): String = {
@@ -1446,6 +1451,7 @@ case class ObjectHashMapAccessor(@transient session: SnappySession,
     }
   }
 
+  // noinspection SameParameterValue
   private def hashCodeSingleInt(hashExpr: String, nullVar: String): String = {
     if (nullVar.isEmpty || nullVar == "false") hashExpr
     else s"($nullVar) ? -1 : $hashExpr"
@@ -1540,6 +1546,7 @@ case class ObjectHashMapAccessor(@transient session: SnappySession,
 
 object ObjectHashMapAccessor {
 
+  @tailrec
   /** return true if the plan returns immutable objects so copy can be avoided */
   def providesImmutableObjects(plan: SparkPlan): Boolean = plan match {
     // For SnappyData row tables there is no need to make a copy of

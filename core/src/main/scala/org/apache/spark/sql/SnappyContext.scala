@@ -150,7 +150,7 @@ class SnappyContext protected[spark](val snappySession: SnappySession)
     * @param tableName
     * @param isAddColumn
     * @param column
-    * @param defaultValue
+    * @param extensions
     */
   def alterTable(tableName: String, isAddColumn: Boolean,
       column: StructField, extensions: String = ""): Unit = {
@@ -320,15 +320,6 @@ class SnappyContext protected[spark](val snappySession: SnappySession)
     createApproxTSTopK(topKName, Option(baseTable), keyColumnName,
       topkOptions.asScala.toMap, allowExisting)
   }
-
-   /**
-    * :: Experimental ::
-    * Creates a [[DataFrame]] from an RDD of Product (e.g. case classes, tuples).
-    * This method handles generic array datatype like Array[Decimal]
-    */
-   def createDataFrameUsingRDD[A <: Product : TypeTag](rdd: RDD[A]): DataFrame = {
-     snappySession.createDataFrameUsingRDD(rdd)
-   }
 
   /**
    * Creates a SnappyData managed table. Any relation providers

@@ -33,7 +33,7 @@ import org.apache.spark.sql.execution.metric.SQLMetric
  * lazy (SortExec checks for "needToSort" so happens only on first processNext).
  */
 case class SnappySortExec(sortPlan: SortExec, child: SparkPlan)
-    extends UnaryExecNode with CodegenSupport {
+    extends UnaryExecNode with CodegenSupportSnappy {
 
   override def nodeName: String = "SnappySort"
 
@@ -82,6 +82,14 @@ case class SnappySortExec(sortPlan: SortExec, child: SparkPlan)
 
   override def inputRDDs(): Seq[RDD[InternalRow]] =
     child.asInstanceOf[CodegenSupport].inputRDDs()
+
+  // The result rows come from the sort buffer, so this operator doesn't need to copy its result
+  // even if its child does.
+  override def needCopyResult: Boolean = false
+
+  // Sort operator always consumes all the input rows before outputting any result, so we don't need
+  // a stop check before sorting.
+  override def needStopCheck: Boolean = false
 
   override protected def doProduce(ctx: CodegenContext): String = {
     val plan = if (child ne sortPlan.child) {

@@ -344,7 +344,7 @@ trait PartitionedDataSourceScan extends PrunedUnsafeFilteredScan {
 private[sql] final case class ZipPartitionScan(basePlan: CodegenSupport,
     basePartKeys: Seq[Expression],
     otherPlan: SparkPlan,
-    otherPartKeys: Seq[Expression]) extends SparkPlan with CodegenSupport
+    otherPartKeys: Seq[Expression]) extends SparkPlan with CodegenSupportSnappy
     with NonRecursivePlans with SparkSupport {
 
   private var consumedCode: String = _
@@ -354,6 +354,8 @@ private[sql] final case class ZipPartitionScan(basePlan: CodegenSupport,
     otherPartKeys, basePlan.inputRDDs().head.getNumPartitions), otherPlan)
 
   override def needCopyResult: Boolean = false
+
+  override def needStopCheck: Boolean = parent.needStopCheck
 
   override def children: Seq[SparkPlan] = basePlan :: withShuffle :: Nil
 
@@ -485,7 +487,7 @@ class StratumInternalRow(val weight: Long) extends InternalRow {
     throw new UnsupportedOperationException("not implemented")
 }
 
-trait BatchConsumer extends CodegenSupport {
+trait BatchConsumer extends CodegenSupportSnappy {
 
   /**
    * Returns true if the given plan returning batches of data can be consumed

@@ -20,6 +20,7 @@ package org.apache.spark.sql.hive
 import java.lang.reflect.InvocationTargetException
 import javax.annotation.concurrent.GuardedBy
 
+import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.concurrent.ExecutionException
@@ -67,6 +68,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     extends SnappyHiveCatalogBase(conf, hadoopConf) with SnappyExternalCatalog {
 
   /** A cache of Spark SQL data source tables that have been accessed. */
+  // noinspection UnstableApiUsage
   protected final val cachedCatalogTables: LoadingCache[(String, String), CatalogTable] = {
 
     // base initialization first
@@ -103,10 +105,12 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
   }
 
   /** A cache of SQL data source tables that are missing in catalog. */
+  // noinspection UnstableApiUsage
   protected final val nonExistentTables: Cache[(String, String), java.lang.Boolean] = {
     CacheBuilder.newBuilder().maximumSize(ConnectorExternalCatalog.cacheSize).build()
   }
 
+  @tailrec
   private def isDisconnectException(t: Throwable): Boolean = {
     if (t ne null) {
       val tClass = t.getClass.getName

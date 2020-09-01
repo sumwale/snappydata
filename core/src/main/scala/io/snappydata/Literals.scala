@@ -96,15 +96,18 @@ object Property extends Enumeration {
         "embedded HiveServer2 with thrift access will be started in foreground. Default is true " +
         "but starts the service in background.", Some(true), prefix = null)
 
+  // TODO: SW: default to 'spark' and change to 'snappy' for JDBC/ODBC routed queries?
+  // However, the row table behaviour is something we want to retain even for direct executions.
   val HiveCompatibility: SQLValue[String] = SQLVal(
-    s"${Constant.PROPERTY_PREFIX}sql.hiveCompatibility", "Property on SnappySession to make " +
-        "alter the hive compatibility level. The 'default' level is Spark compatible except for " +
-        "CREATE TABLE which defaults to row tables. A value of 'spark' makes it fully Spark " +
+    s"${Constant.PROPERTY_PREFIX}sql.hiveCompatibility", "Property on SnappySession to " +
+        "alter the hive compatibility level. The level 'snappy' is Spark compatible except for " +
+        "CREATE TABLE which defaults to SnappyData's row tables and double quoted values being " +
+        "quoted identifiers and not string literals. A value of 'spark' makes it fully Spark " +
         s"compatible where CREATE TABLE defaults to hive tables when catalogImplementation is " +
-        "'hive' for the session.  When set to 'full' then in addition to the behaviour " +
-        "with 'spark', it makes the behavior hive compatible for statements like SHOW TABLES " +
-        "rather than being compatible with Spark SQL. Default is 'default'.",
-    Some("default"), prefix = null)
+        "'hive' for the session and double quoted values are string literals in SQL parsing. " +
+        "When set to 'full' then in addition to the behaviour with 'spark', it makes the " +
+        "behavior hive compatible for statements like SHOW TABLES rather than being " +
+        "compatible with Spark SQL. Default is 'snappy'.", Some("snappy"), prefix = null)
 
   val HiveServerUseHiveSession: SparkValue[Boolean] = Val(
     s"${Constant.PROPERTY_PREFIX}hiveServer.useHiveSession", "If true, then the session " +
@@ -347,11 +350,11 @@ object HintName extends Enumeration {
 
   // hints for joinType
   /** broadcast join */
-  val JoinType_Broadcast = Name("broadcast", "broadcastJoin", "mapJoin")
+  val JoinType_Broadcast: HintName.Type = Name("broadcast", "broadcastJoin", "mapJoin")
   /** hash join (both colocated or after exchange) */
-  val JoinType_Hash = Name("hash", "hashJoin")
+  val JoinType_Hash: HintName.Type = Name("hash", "hashJoin")
   /** force sort-merge-join in case some other is being selected */
-  val JoinType_Sort = Name("sort", "sortMerge", "sortMergeJoin")
+  val JoinType_Sort: HintName.Type = Name("sort", "sortMerge", "sortMergeJoin")
 
   // hints for joinOrder
   /**
@@ -361,7 +364,7 @@ object HintName extends Enumeration {
    * `Note:` user specified index hint will be honored and optimizer will only attempt for
    * other tables in the query.
    */
-  val JoinOrder_ContinueOptimizations = Name("continueOpts")
+  val JoinOrder_ContinueOptimizations: HintName.Type = Name("continueOpts")
   /**
    * By default if query have atleast one colocated join conditions mentioned between a pair of
    * partitiioned tables, optimizer won't try to derive colocation possibilities with replicated
@@ -369,11 +372,11 @@ object HintName extends Enumeration {
    * partition like indirect colocation possibilities even if partition -> partition join
    * conditions are mentioned.
    */
-  val JoinOrder_IncludeGeneratedPaths = Name("includeGeneratedPaths")
+  val JoinOrder_IncludeGeneratedPaths: HintName.Type = Name("includeGeneratedPaths")
   /**
    * Don't alter the join order provided by the user.
    */
-  val JoinOrder_Fixed = Name("fixed")
+  val JoinOrder_Fixed: HintName.Type = Name("fixed")
 }
 
 /**

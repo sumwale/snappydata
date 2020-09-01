@@ -532,7 +532,7 @@ trait SplitClusterDUnitTestObject extends Logging {
             drnd2)), dec(1), ts(math.abs(rnd1) % 5))
     }
     val rdd = context.parallelize(data, 8)
-    val dataDF = snc.createDataFrameUsingRDD(rdd)
+    val dataDF = snc.createDataFrame(rdd)
 
     snc.createTable(tableName, tableType, dataDF.schema, props)
     dataDF.write.insertInto(tableName)

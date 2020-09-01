@@ -41,3 +41,14 @@ trait CodegenSupportOnExecutor extends CodegenSupport {
      """.stripMargin
   }
 }
+
+/**
+ * Adds methods to [[CodegenSupport]] present in newer Spark releases that allows
+ * child classes to override and still compile fine in older releases.
+ */
+trait CodegenSupportSnappy extends CodegenSupport {
+
+  def needCopyResult: Boolean
+
+  def needStopCheck: Boolean
+}

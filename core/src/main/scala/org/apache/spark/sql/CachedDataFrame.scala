@@ -50,21 +50,21 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.CollectAggregateExec
 import org.apache.spark.sql.execution.ui.{SparkListenerSQLExecutionEnd, SparkListenerSQLExecutionStart}
 import org.apache.spark.sql.store.CompressionUtils
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.storage.{BlockManager, RDDBlockId, StorageLevel}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.CallSite
 
-class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecution,
+class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecution,
     private[sql] val queryExecutionString: String,
     @transient private[sql] val queryPlanInfo: SparkPlanInfo,
     private[sql] var currentQueryExecutionString: String,
     @transient private[sql] var currentQueryPlanInfo: SparkPlanInfo,
-    cachedRDD: RDD[InternalRow], shuffleDependencies: Array[Int], encoder: Encoder[Row],
+    private var cachedRDD: RDD[InternalRow], shuffleDependencies: Array[Int], encoder: Encoder[Row],
     shuffleCleanups: Array[Future[Unit]], val rddId: Int, noSideEffects: Boolean,
     val queryHints: java.util.Map[String, String], private[sql] var currentExecutionId: Long,
     private[sql] var planningTime: Long, val linkPart : Boolean = false)
-    extends Dataset[Row](snappySession, queryExecution, encoder) with Logging {
+    extends Dataset[Row](snappySession, snappySession.snappySessionState.newQueryExecution(
+      _queryExecution.logical), encoder) {
 
   private[sql] final def isCached: Boolean = cachedRDD ne null
 
@@ -79,7 +79,7 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
     if (_boundEnc ne null) _boundEnc
     else {
       _boundEnc = exprEnc.resolveAndBind(logicalPlan.output,
-        snappySession.sessionState.analyzer)
+        snappySession.snappySessionState.analyzer)
       _boundEnc
     }
   }
@@ -155,8 +155,6 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
       queryPlanInfo, currentQueryExecutionString = null, currentQueryPlanInfo = null, cachedRDD,
       shuffleDependencies, encoder, shuffleCleanups, rddId, noSideEffects, queryHints,
       currentExecutionId = -1L, planningTime = -1L, linkPart)
-    cdf.log_ = log_
-    cdf.levelFlags = levelFlags
     cdf._boundEnc = boundEnc // force materialize boundEnc which is commonly used
     cdf._rowConverter = _rowConverter
     cdf.paramLiterals = paramLiterals
@@ -187,14 +185,12 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
   private def clearPartitions(rdds: Seq[RDD[_]]): Unit = {
     val children = rdds.flatMap {
       case null => Nil
-    case r =>
+      case r =>
         // f.set(r, null)
         Platform.putObjectVolatile(r, Utils.rddPartitionsOffset, null)
         getChildren(r)
     }
-    if (children.nonEmpty) {
-      clearPartitions(children)
-    }
+    if (children.nonEmpty) clearPartitions(children)
   }
 
   // Its a bit costly operation,
@@ -207,11 +203,8 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
       case r =>
         r.getNumPartitions
         getChildren(r)
-
     }
-    if (children.nonEmpty) {
-      reEvaluatePartitions(children)
-    }
+    if (children.nonEmpty) reEvaluatePartitions(children)
   }
 
   private def setPoolForExecution(): Unit = {
@@ -310,17 +303,11 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
     (result, System.nanoTime() - start)
   }
 
-  override def count(): Long = withCallback("count") { df =>
-    val start = System.nanoTime()
-    val result = df.groupBy().count().collect().head.getLong(0)
-    (result, System.nanoTime() - start)
-  }
+  override def count(): Long = withCallback("count")(
+    CachedDataFrame.toTimedCallback(_.groupBy().count().collect().head.getLong(0)))
 
-  override def head(n: Int): Array[Row] = withCallback("head") { df =>
-    val start = System.nanoTime()
-    val result = df.limit(n).collect()
-    (result, System.nanoTime() - start)
-  }
+  override def head(n: Int): Array[Row] = withCallback("head")(
+    CachedDataFrame.toTimedCallback(_.limit(n).collect()))
 
   override def collectAsList(): java.util.List[Row] = {
     java.util.Arrays.asList(collect(): _*)
@@ -332,8 +319,9 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
 
   def collectInternal(): Iterator[InternalRow] = {
     if (noSideEffects) {
+      val numFields = queryExecution.executedPlan.schema.length
       collectWithHandler[Array[Byte], Iterator[UnsafeRow]](CachedDataFrame,
-        (_, data) => CachedDataFrame.decodeUnsafeRows(schema.length, data, 0,
+        (_, data) => CachedDataFrame.decodeUnsafeRows(numFields, data, 0,
           data.length), identity).flatten
     } else {
       // skip double encoding/decoding for the case when underlying plan
@@ -365,9 +353,12 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
 
       executedPlan match {
         case plan: CollectLimitExec =>
-          val takeRDD = if (isCached) cachedRDD else plan.child.execute()
+          val takeRDD =
+            if (isCached) cachedRDD
+            else if (withFallback ne null) withFallback.execute(plan.child)
+            else plan.child.execute()
           CachedDataFrame.executeTake(takeRDD, plan.limit, processPartition,
-            resultHandler, decodeResult, schema, snappySession)
+            resultHandler, decodeResult, snappySession)
 
         case plan: CollectAggregateExec =>
           if (skipLocalCollectProcessing) {
@@ -403,8 +394,7 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
             executeCollect().iterator.asInstanceOf[Iterator[R]]
           } else {
             try {
-              val execRDD = getExecRDD
-              runAsJob(execRDD, processPartition, resultHandler, sc)
+              runAsJob(getExecRDD, processPartition, resultHandler, sc)
             } catch {
               case t: Throwable
                 if CachedDataFrame.isConnectorCatalogStaleException(t, snappySession) =>
@@ -445,6 +435,20 @@ class CachedDataFrame(snappySession: SnappySession, queryExecution: QueryExecuti
       (index: Int, r: (U, Int)) =>
         results(index) = resultHandler(index, r._1))
     results.iterator
+  }
+
+  override def persist(): this.type = {
+    super.persist()
+    // remove cached RDD
+    cachedRDD = null
+    this
+  }
+
+  override def persist(newLevel: StorageLevel): this.type = {
+    super.persist(newLevel)
+    // remove cached RDD
+    cachedRDD = null
+    this
   }
 }
 
@@ -752,7 +756,7 @@ object CachedDataFrame
   private[sql] def executeTake[U: ClassTag, R](rdd: RDD[InternalRow], n: Int,
       processPartition: (TaskContext, Iterator[InternalRow]) => (U, Int),
       resultHandler: (Int, U) => R, decodeResult: R => Iterator[InternalRow],
-      schema: StructType, session: SnappySession): Iterator[R] = {
+      session: SnappySession): Iterator[R] = {
     if (n == 0) {
       return Iterator.empty
     }
@@ -771,7 +775,7 @@ object CachedDataFrame
         // If we didn't find any rows after the previous iteration, quadruple and retry.
         // Otherwise, interpolate the number of partitions we need to try, but overestimate
         // it by 50%. We also cap the estimation in the end.
-        val limitScaleUpFactor = Math.max(session.sessionState.conf.limitScaleUpFactor, 2)
+        val limitScaleUpFactor = Math.max(session.snappySessionState.conf.limitScaleUpFactor, 2)
         if (numResults == 0) {
           numPartsToTry = partsScanned * limitScaleUpFactor
         } else {
@@ -820,6 +824,13 @@ object CachedDataFrame
     }
   }
 
+  private[sql] def toTimedCallback[U](action: DataFrame => U): DataFrame => (U, Long) = {
+    (df: DataFrame) =>
+      val start = System.nanoTime()
+      val result = action(df)
+      (result, System.nanoTime() - start)
+  }
+
   def isConnectorCatalogStaleException(t: Throwable, session: SnappySession): Boolean = {
 
     // error check needed in SmartConnector mode only
@@ -849,7 +860,7 @@ object CachedDataFrame
     false
   }
 
-  def catalogStaleFailure(cause: Throwable, session: SnappySession): Exception = {
+  def catalogStaleFailure(cause: Throwable): Exception = {
     logWarning(s"SmartConnector catalog is not up to date. " +
         s"Please reconstruct the Dataset and retry the operation")
     new CatalogStaleException("Smart connector catalog is out of date due to " +
@@ -875,7 +886,7 @@ object CachedDataFrame
             Thread.sleep(attempts*100)
             attempts = attempts + 1
           } else {
-            throw CachedDataFrame.catalogStaleFailure(t, snappySession)
+            throw CachedDataFrame.catalogStaleFailure(t)
           }
       }
     }

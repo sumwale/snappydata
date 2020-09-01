@@ -21,9 +21,8 @@ import java.lang.reflect.{Field, Method}
 import scala.collection.mutable
 
 import com.gemstone.gemfire.internal.shared.unsafe.UnsafeHolder
-import io.snappydata.Property.HashAggregateSize
 import io.snappydata.sql.catalog.SnappyExternalCatalog
-import io.snappydata.{HintName, QueryHint}
+import io.snappydata.{HintName, Property, QueryHint}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.deploy.SparkSubmitUtils
@@ -31,7 +30,7 @@ import org.apache.spark.internal.config.ConfigBuilder
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FunctionBuilder
-import org.apache.spark.sql.catalyst.analysis.{Analyzer, UnresolvedRegex, UnresolvedRelation, UnresolvedSubqueryColumnAliases, UnresolvedTableValuedFunction}
+import org.apache.spark.sql.catalyst.analysis.{Analyzer, UnresolvedRegex, UnresolvedSubqueryColumnAliases, UnresolvedTableValuedFunction}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction}
@@ -46,7 +45,7 @@ import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.catalyst.{AccessUtils, FunctionIdentifier, InternalRow, TableIdentifier}
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.columnar.ColumnTableScan
-import org.apache.spark.sql.execution.command.{ClearCacheCommand, CreateFunctionCommand, CreateTableLikeCommand, DescribeTableCommand, ExplainCommand, RunnableCommand}
+import org.apache.spark.sql.execution.command.{ClearCacheCommand, CreateFunctionCommand, CreateTableLikeCommand, DescribeTableCommand, ExplainCommand, RunnableCommand, TruncateTableCommand}
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.row.RowTableScan
@@ -81,9 +80,9 @@ abstract class Spark23_4_Internals extends SparkInternals {
     UnsafeHolder.getUnsafe.objectFieldOffset(f)
   }
 
-  override def registerFunction(session: SparkSession, name: FunctionIdentifier,
+  override def registerFunction(sessionState: SnappySessionState, name: FunctionIdentifier,
       info: ExpressionInfo, function: Seq[Expression] => Expression): Unit = {
-    session.sessionState.functionRegistry.registerFunction(name, info, function)
+    sessionState.functionRegistry.registerFunction(name, info, function)
   }
 
   override def addClassField(ctx: CodegenContext, javaType: String,
@@ -214,10 +213,7 @@ abstract class Spark23_4_Internals extends SparkInternals {
   override def newDescribeTableCommand(table: TableIdentifier,
       partitionSpec: Map[String, String], isExtended: Boolean,
       isFormatted: Boolean): RunnableCommand = {
-    if (isFormatted) {
-      throw new ParseException(s"DESCRIBE FORMATTED TABLE not supported in Spark $version")
-    }
-    DescribeTableCommand(table, partitionSpec, isExtended)
+    DescribeTableCommand(table, partitionSpec, isExtended || isFormatted)
   }
 
   override def newCreateTableLikeCommand(targetIdent: TableIdentifier,
@@ -261,16 +257,8 @@ abstract class Spark23_4_Internals extends SparkInternals {
     GroupingSets(groupingSets, groupByExprs, child, aggregations)
   }
 
-  override def newUnresolvedRelation(tableIdentifier: TableIdentifier,
-      alias: Option[String]): LogicalPlan = alias match {
-    case None => UnresolvedRelation(tableIdentifier)
-    case Some(a) => SubqueryAlias(a, UnresolvedRelation(tableIdentifier))
-  }
-
-  override def unresolvedRelationAlias(u: UnresolvedRelation): Option[String] = None
-
   override def newSubqueryAlias(alias: String, child: LogicalPlan,
-      view: Option[TableIdentifier]): SubqueryAlias = {
+      view: Option[TableIdentifier]): LogicalPlan = {
     if (view.isDefined && !alias.equalsIgnoreCase(view.get.table)) {
       throw new AnalysisException(s"Conflicting alias and view: alias=$alias, view=${view.get}")
     }
@@ -521,6 +509,10 @@ abstract class Spark23_4_Internals extends SparkInternals {
       codegen: Boolean, cost: Boolean): LogicalPlan = {
     ExplainCommand(logicalPlan, extended, codegen, cost)
   }
+
+  override def newTruncateTableCommand(tableName: TableIdentifier): Option[RunnableCommand] = {
+    Some(TruncateTableCommand(tableName, partitionSpec = None))
+  }
 }
 
 /**
@@ -657,7 +649,7 @@ abstract class SnappySessionStateBuilder23_4(session: SnappySession,
         // `StatefulAggregationStrategy` which is applied by spark for streaming queries. This
         // implies that Snappydata aggregation optimisation will be turned off for any usage of
         // this session including non-streaming queries.
-        HashAggregateSize.set(conf, "-1")
+        Property.HashAggregateSize.set(conf, "-1")
         super.startQuery(userSpecifiedName, userSpecifiedCheckpointLocation, df,
           extraOptions, sink, outputMode, useTempCheckpointLocation,
           recoverFromCheckpointLocation, trigger, triggerClock)

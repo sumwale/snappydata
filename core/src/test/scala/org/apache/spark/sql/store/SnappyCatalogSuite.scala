@@ -105,7 +105,8 @@ class SnappyCatalogSuite extends SnappyFunSuite
   private def createTempFunction(name: String): Unit = {
     val info = new ExpressionInfo("className", name)
     val tempFunc = (e: Seq[Expression]) => e.head
-    internals.registerFunction(snappySession, FunctionIdentifier(name, None), info, tempFunc)
+    internals.registerFunction(snappySession.snappySessionState, FunctionIdentifier(name, None),
+      info, tempFunc)
   }
 
   private def dropFunction(name: String, db: Option[String] = None): Unit = {

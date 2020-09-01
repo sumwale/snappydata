@@ -60,6 +60,10 @@ dependencies {
   }
   compile project(compatProjectName)
 
+  compile project(':snappy-spark:snappy-spark-sql_' + scalaBinaryVersion)
+  compile project(':snappy-spark:snappy-spark-hive_' + scalaBinaryVersion)
+  compile project(':snappy-spark:snappy-spark-sql-kafka-0.10_' + scalaBinaryVersion)
+
   // some tests expect resource files as having file: URI and not jar:file:
   testRuntime files("${projectDir}/../spark/sql/core/src/test/resources")
   testRuntime files("${projectDir}/../spark/sql/hive/src/test/resources")
