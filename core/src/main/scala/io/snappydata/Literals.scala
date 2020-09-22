@@ -129,6 +129,10 @@ object Property extends Enumeration {
     s"${Constant.PROPERTY_PREFIX}sql.catalogCacheSize",
     s"Number of catalog tables whose meta-data will be cached.", Some(2000))
 
+  val DataSourceCacheSize: SparkValue[Int] = Val[Int](
+    s"${Constant.PROPERTY_PREFIX}sql.dataSourceCacheSize",
+    s"Cache size for data source lookup in SparkInternals.lookupDataSource.", Some(200))
+
   val ColumnBatchSize: SQLValue[String] = SQLVal[String](
     s"${Constant.PROPERTY_PREFIX}column.batchSize",
     "The default size of blocks to use for storage in SnappyData column " +
@@ -468,7 +472,7 @@ object QueryHint extends Enumeration {
    *
    * Example:<br>
    * SELECT id, name, addr, medical_history FROM t1 --+ columnsAsClob(addr)
-   * SELECT id, name, addr, medical_history FROM t1 --+ columnsAsClob(*)
+   * SELECT id, name, addr, medical_history FROM t1 /*+ columnsAsClob(*) */
    */
   val ColumnsAsClob: Type = HintValue("columnsAsClob", Vector.empty)
 }

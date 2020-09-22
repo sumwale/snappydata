@@ -41,7 +41,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeRef
 import org.apache.spark.sql.catalyst.json.JSONOptions
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, SQLBuilder, TableIdentifier}
 import org.apache.spark.sql.execution._
@@ -415,9 +415,12 @@ class Spark21Internals(override val version: String) extends SparkInternals {
   }
 
   override def newLogicalPlanWithHints(child: LogicalPlan,
-      hints: Map[QueryHint.Type, HintName.Type]): LogicalPlan = {
-    new PlanWithHints21(child, hints)
+      hints: Map[String, String]): LogicalPlan = {
+    new PlanWithHints21(child, newCaseInsensitiveMap(hints))
   }
+
+  override def newUnresolvedHint(name: String, parameters: Seq[Any],
+      child: LogicalPlan): LogicalPlan = child
 
   override def newTableSample(lowerBound: Double, upperBound: Double, withReplacement: Boolean,
       seed: Long, child: LogicalPlan): Sample = {
@@ -426,9 +429,10 @@ class Spark21Internals(override val version: String) extends SparkInternals {
 
   override def isHintPlan(plan: LogicalPlan): Boolean = plan.isInstanceOf[BroadcastHint]
 
-  override def getHints(plan: LogicalPlan): Map[QueryHint.Type, HintName.Type] = plan match {
+  override def getHints(plan: LogicalPlan): Map[String, String] = plan match {
     case p: PlanWithHints21 => p.allHints
-    case _: BroadcastHint => Map(QueryHint.JoinType -> HintName.JoinType_Broadcast)
+    case _: BroadcastHint =>
+      newCaseInsensitiveMap(Map(QueryHint.JoinType.name -> HintName.JoinType_Broadcast.names.head))
     case _ => Map.empty
   }
 
@@ -581,7 +585,7 @@ class Spark21Internals(override val version: String) extends SparkInternals {
     new SmartConnectorExternalCatalog21(session)
   }
 
-  override def lookupDataSource(provider: String, conf: => SQLConf): Class[_] =
+  override protected def basicLookupDataSource(provider: String, conf: => SQLConf): Class[_] =
     DataSource.lookupDataSource(provider)
 
   override def newShuffleExchange(newPartitioning: Partitioning, child: SparkPlan): Exchange = {
@@ -736,6 +740,11 @@ class Spark21Internals(override val version: String) extends SparkInternals {
             PromoteStrings :: Nil).asInstanceOf[Seq[Rule[LogicalPlan]]]
       case r => r :: Nil
     }
+  }
+
+  override def newHashClusteredDistribution(expressions: Seq[Expression],
+      requiredNumPartitions: Option[Int]): Distribution = {
+    ClusteredDistribution(expressions, requiredNumPartitions)
   }
 }
 

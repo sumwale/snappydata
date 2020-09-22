@@ -102,7 +102,7 @@ trait TableExec extends UnaryExecNode with CodegenSupportOnExecutor
         else childOutput.find(_.name.equalsIgnoreCase(partColumn)).getOrElse(
           throw new IllegalStateException("Cannot find partitioning column " +
               s"$partColumn in child output for $toString")))
-      ClusteredDistribution(childPartitioningAttributes) :: Nil
+      internals.newHashClusteredDistribution(childPartitioningAttributes) :: Nil
     } else UnspecifiedDistribution :: Nil
   }
 

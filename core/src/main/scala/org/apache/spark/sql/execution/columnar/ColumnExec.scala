@@ -24,7 +24,7 @@ import org.apache.spark.sql.SnappySession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenContext
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution}
+import org.apache.spark.sql.catalyst.plans.physical.Distribution
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.columnar.impl.{JDBCSourceAsColumnarStore, SnapshotConnectionListener}
 import org.apache.spark.sql.execution.row.RowExec
@@ -51,7 +51,7 @@ trait ColumnExec extends RowExec {
       // for tables with no partitioning, require partitioning on batchId so that all rows of
       // a batch are together else it results in very large number of changes for each batch
       // strewn across all partitions
-      ClusteredDistribution(keyColumns(keyColumns.length - 3) :: Nil) :: Nil
+      internals.newHashClusteredDistribution(keyColumns(keyColumns.length - 3) :: Nil) :: Nil
     }
   }
 

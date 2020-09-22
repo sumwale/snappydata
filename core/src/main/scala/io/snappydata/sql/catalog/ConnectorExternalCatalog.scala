@@ -17,6 +17,7 @@
 package io.snappydata.sql.catalog
 
 import java.util.Collections
+import java.util.concurrent.Callable
 
 import scala.collection.JavaConverters._
 
@@ -44,6 +45,7 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
   }
 
   /** A cache of Spark SQL data source tables that have been accessed. */
+  // noinspection UnstableApiUsage
   private[catalog] lazy val cachedCatalogTables: Cache[(String, String),
       (CatalogTable, Option[RelationInfo])] = {
     CacheBuilder.newBuilder().maximumSize(cacheSize).build()
@@ -245,10 +247,11 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
 
   private def loadFromCache(name: (String, String),
       catalog: SmartConnectorExternalCatalog): (CatalogTable, Option[RelationInfo]) = {
+    // avoid callable object creation if possible
     cachedCatalogTables.getIfPresent(name) match {
-      case null => synchronized {
-        cachedCatalogTables.getIfPresent(name) match {
-          case null =>
+      case null =>
+        cachedCatalogTables.get(name, new Callable[(CatalogTable, Option[RelationInfo])] {
+          override def call(): (CatalogTable, Option[RelationInfo]) = {
             logDebug(s"Looking up data source for $name")
             val request = new CatalogMetadataRequest()
             request.setSchemaName(name._1).setNameOrPattern(name._2)
@@ -256,13 +259,9 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
               snappydataConstants.CATALOG_GET_TABLE, request))
             if (!result.isSetCatalogTable) throw new TableNotFoundException(name._1, name._2)
             val (table, relationInfo) = convertToCatalogTable(result, catalog.session)
-            val tableMetadata = table -> relationInfo
-            cachedCatalogTables.put(name, tableMetadata)
-            tableMetadata
-
-          case result => result
-        }
-      }
+            table -> relationInfo
+          }
+        })
       case result => result
     }
   }

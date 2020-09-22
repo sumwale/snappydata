@@ -35,7 +35,7 @@ class SnappyGlobalTempViewSuite extends GlobalTempViewSuite
 
   private var globalTempDB: String = _
 
-  override def excluded: Seq[String] = Seq(
+  override def overridden: Seq[String] = Seq(
     "basic semantic",
     "should lookup global temp view if and only if global temp db is specified"
   )
@@ -53,7 +53,7 @@ class SnappyGlobalTempViewSuite extends GlobalTempViewSuite
     sql(s"DROP VIEW src")
 
     // The global temp view should be dropped successfully.
-    intercept[TableNotFoundException](spark.table(s"$globalTempDB.src"))
+    intercept[AnalysisException](spark.table(s"$globalTempDB.src"))
 
     // We can also use Dataset API to create global temp view
     Seq(1 -> "a").toDF("i", "j").createGlobalTempView("src")
@@ -61,7 +61,7 @@ class SnappyGlobalTempViewSuite extends GlobalTempViewSuite
 
     // Use qualified name to rename a global temp view.
     sql(s"ALTER VIEW $globalTempDB.src RENAME TO src2")
-    intercept[TableNotFoundException](spark.table(s"$globalTempDB.src"))
+    intercept[AnalysisException](spark.table(s"$globalTempDB.src"))
     checkAnswer(spark.table(s"$globalTempDB.src2"), Row(1, "a"))
 
     // Use qualified name to alter a global temp view.
@@ -70,7 +70,7 @@ class SnappyGlobalTempViewSuite extends GlobalTempViewSuite
 
     // We can also use Catalog API to drop global temp view
     spark.catalog.dropGlobalTempView("src2")
-    intercept[TableNotFoundException](spark.table(s"$globalTempDB.src2"))
+    intercept[AnalysisException](spark.table(s"$globalTempDB.src2"))
   }
 
   test("should lookup global temp view if possible") {

@@ -100,12 +100,12 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
   /**
    * Format table name. Hive meta-store is case-insensitive so always convert to lower case.
    */
-  override def formatTableName(name: String): String = JdbcExtendedUtils.toLowerCase(name)
+  override def formatTableName(name: String): String = formatName(name)
 
   /**
    * Format schema name. Hive meta-store is case-insensitive so always convert to lower case.
    */
-  override def formatDatabaseName(name: String): String = JdbcExtendedUtils.toLowerCase(name)
+  override def formatDatabaseName(name: String): String = formatName(name)
 
   /**
    * Fallback session state to lookup from external hive catalog in case
@@ -122,7 +122,7 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
     !snappySession.enableHiveSupport || super.tableExists(tableIdent)
 
   final def formatName(name: String): String =
-    if (sqlConf.caseSensitiveAnalysis) name else JdbcExtendedUtils.toLowerCase(name)
+    if (snappySession.snappyParser.caseSensitive) name else JdbcExtendedUtils.toLowerCase(name)
 
   /** API to get primary key or Key Columns of a SnappyData table */
   def getKeyColumns(table: String): Seq[Column] = getKeyColumnsAndPositions(table).map(_._1)
@@ -167,6 +167,7 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
         }
   }
 
+  /*
   final def getCombinedPolicyFilterForExternalTable(rlsRelation: RowLevelSecurityRelation,
       wrappingLogicalRelation: Option[LogicalRelation],
       currentUser: Option[String]): Option[Filter] = {
@@ -174,6 +175,7 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
     // getCombinedPolicyFilter(rlsRelation, wrappingLogicalRelation, currentUser)
     None
   }
+  */
 
   final def getCombinedPolicyFilterForNativeTable(rlsRelation: RowLevelSecurityRelation,
       wrappingLogicalRelation: Option[LogicalRelation]): Option[Filter] = {

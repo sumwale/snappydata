@@ -88,6 +88,8 @@ class StoreHiveCatalog extends ExternalCatalog with Logging with SparkSupport {
     catalogQueriesExecutorService.submit(q)
   }
 
+  private lazy val sqlConf = new SQLConf
+
   private var externalCatalog: SnappyHiveExternalCatalog = _
 
   override def waitForInitialization(): Boolean = {
@@ -293,7 +295,7 @@ class StoreHiveCatalog extends ExternalCatalog with Logging with SparkSupport {
             }
             metaData.shortProvider = metaData.provider
             try {
-              val c = internals.lookupDataSource(metaData.provider, new SQLConf)
+              val c = internals.lookupDataSource(metaData.provider, sqlConf)
               if (classOf[DataSourceRegister].isAssignableFrom(c)) {
                 metaData.shortProvider = c.newInstance.asInstanceOf[DataSourceRegister].shortName()
               }

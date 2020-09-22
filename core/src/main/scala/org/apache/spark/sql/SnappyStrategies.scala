@@ -91,9 +91,10 @@ private[sql] trait SnappyStrategies {
       case HintName.JoinType_Hash =>
         if (canBuild(joinType)) {
           // don't hash join beyond 10GB estimated size because that is likely a mistake
+          // also check that size estimation is a valid one (its likely invalid if too large)
           val buildSize = getStats(buildPlan).sizeInBytes
-          if (buildSize > math.max(JoinStrategy.getMaxHashJoinSize(conf),
-            10L * 1024L * 1024L * 1024L)) {
+          if (buildSize < (Long.MaxValue >> 4) && buildSize > math.max(
+            JoinStrategy.getMaxHashJoinSize(conf), 10L * 1024L * 1024L * 1024L)) {
             snappySession.addWarning(new SQLWarning(s"Plan hint ${QueryHint.JoinType}=" +
                 s"$joinHint for ${right.simpleString} skipped for ${joinType.sql} " +
                 s"JOIN on columns=$rightKeys due to large estimated buildSize=$buildSize. " +
@@ -106,9 +107,11 @@ private[sql] trait SnappyStrategies {
         } else Nil
       case HintName.JoinType_Broadcast =>
         if (canBuild(joinType)) {
-          // don't broadcast beyond 1GB estimated size because that is likely a mistake
+          // don't broadcast beyond 10GB estimated size because that is likely a mistake
+          // also check that size estimation is a valid one (its likely invalid if too large)
           val buildSize = getStats(buildPlan).sizeInBytes
-          if (buildSize > math.max(conf.autoBroadcastJoinThreshold, 1L * 1024L * 1024L * 1024L)) {
+          if (buildSize < (Long.MaxValue >> 4) && buildSize > math.max(
+            conf.autoBroadcastJoinThreshold, 10L * 1024L * 1024L * 1024L)) {
             snappySession.addWarning(new SQLWarning(s"Plan hint ${QueryHint.JoinType}=" +
                 s"$joinHint for ${right.simpleString} skipped for ${joinType.sql} " +
                 s"JOIN on columns=$rightKeys due to large estimated buildSize=$buildSize. " +
@@ -341,9 +344,11 @@ private[sql] trait SnappyStrategies {
 
 private[sql] object JoinStrategy extends SparkSupport {
 
-  def hasBroadcastHint(hints: Map[QueryHint.Type, HintName.Type]): Boolean = {
-    hints.get(QueryHint.JoinType) match {
-      case Some(h) => HintName.JoinType_Broadcast == h
+  def hasBroadcastHint(hints: Map[String, String]): Boolean = {
+    // hints should be a case-insensitive map
+    assert(hints.getClass.getName.contains("CaseInsensitiveMap"))
+    hints.get(QueryHint.JoinType.name) match {
+      case Some(h) => HintName.JoinType_Broadcast.names.exists(h.equalsIgnoreCase)
       case None => false
     }
   }
@@ -362,7 +367,14 @@ private[sql] object JoinStrategy extends SparkSupport {
    */
   @tailrec
   private[sql] def getJoinHint(plan: LogicalPlan): Option[HintName.Type] = plan match {
-    case p if internals.isHintPlan(p) => internals.getHints(p).get(QueryHint.JoinType)
+    case p if internals.isHintPlan(p) =>
+      val hints = internals.getHints(p)
+      // hints should be a case-insensitive map
+      assert(hints.getClass.getName.contains("CaseInsensitiveMap"))
+      hints.get(QueryHint.JoinType.name) match {
+        case None => None
+        case Some(v) => QueryHint.JoinType.get(v)
+      }
     case _: Filter | _: Project | _: LocalLimit =>
       getJoinHint(plan.asInstanceOf[UnaryNode].child)
     case _ => None

@@ -304,10 +304,10 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
   }
 
   override def count(): Long = withCallback("count")(
-    CachedDataFrame.toTimedCallback(_.groupBy().count().collect().head.getLong(0)))
+    CachedDataFrame.timedCallback(_.groupBy().count().collect().head.getLong(0)))
 
   override def head(n: Int): Array[Row] = withCallback("head")(
-    CachedDataFrame.toTimedCallback(_.limit(n).collect()))
+    CachedDataFrame.timedCallback(_.limit(n).collect()))
 
   override def collectAsList(): java.util.List[Row] = {
     java.util.Arrays.asList(collect(): _*)
@@ -824,11 +824,10 @@ object CachedDataFrame
     }
   }
 
-  private[sql] def toTimedCallback[U](action: DataFrame => U): DataFrame => (U, Long) = {
-    (df: DataFrame) =>
-      val start = System.nanoTime()
-      val result = action(df)
-      (result, System.nanoTime() - start)
+  private[sql] def timedCallback[U](action: DataFrame => U)(df: DataFrame): (U, Long) = {
+    val start = System.nanoTime()
+    val result = action(df)
+    (result, System.nanoTime() - start)
   }
 
   def isConnectorCatalogStaleException(t: Throwable, session: SnappySession): Boolean = {

@@ -19,11 +19,12 @@ package org.apache.spark.sql
 import java.util.concurrent.ConcurrentHashMap
 
 import com.gemstone.gemfire.internal.shared.SystemProperties
-import io.snappydata.{HintName, QueryHint}
+import io.snappydata.QueryHint
 import org.eclipse.collections.impl.map.mutable.UnifiedMap
 import org.eclipse.collections.impl.set.mutable.UnifiedSet
 import org.parboiled2._
 
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.ParserUtils
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, IdentifierWithDatabase, TableIdentifier}
@@ -37,7 +38,7 @@ import org.apache.spark.sql.{SnappyParserConsts => Consts}
  */
 abstract class SnappyBaseParser extends Parser() {
 
-  protected final var caseSensitive: Boolean = _
+  protected[sql] final var caseSensitive: Boolean = _
 
   protected final var escapedStringLiterals: Boolean = _
 
@@ -47,71 +48,52 @@ abstract class SnappyBaseParser extends Parser() {
 
   protected final var legacySetOpsPrecedence: Boolean = _
 
-  protected final var isQuoted: Boolean = _
+  protected final var quotedFlags: Int = _
+
+  /**
+   * Disable hints processing within comments. This is done for two cases:
+   * a) hints are plan level so they are explicitly processed to wrap the current LogicalPlan
+   * b) expression parsing within value of hint will disable it to avoid nested hints
+   */
+  protected final var hintsEnabled: Boolean = true
 
   private[sql] final val queryHints: ConcurrentHashMap[String, String] =
     new ConcurrentHashMap[String, String](4, 0.7f, 1)
 
-  @volatile private final var _planHints: java.util.Stack[(QueryHint.Type, HintName.Type)] = _
-
-  /**
-   * Tracks the hints that need to be applied at current plan level and will be
-   * wrapped by LogicalPlan
-   */
-  private[sql] final def planHints: java.util.Stack[(QueryHint.Type, HintName.Type)] = {
-    val hints = _planHints
-    if (hints ne null) hints
-    else synchronized {
-      if (_planHints eq null) _planHints = new java.util.Stack[(QueryHint.Type, HintName.Type)]
-      _planHints
-    }
+  protected final def disableHints: Boolean = {
+    val v = hintsEnabled
+    hintsEnabled = false
+    v
   }
 
-  private[sql] final def hasPlanHints: Boolean = (_planHints ne null) && !_planHints.isEmpty
-
-  protected def clearQueryHints(): Unit = {
-    if (!queryHints.isEmpty) queryHints.clear()
-    if (_planHints ne null) _planHints = null
+  protected final def hintStatement: Rule1[(String, String, Seq[Expression])] = rule {
+    // disable possible nested hint processing
+    push(disableHints) ~ identifier ~ capture((O_PAREN ~ (primaryExpression + commaSep) ~
+        C_PAREN).?) ~> { (enabled: Boolean, name: String, args: Any, value: String) =>
+      hintsEnabled = enabled
+      val stringValue = if (value.isEmpty) value else value.substring(1, value.length - 2).trim
+      // put all hints into the queryHints map including plan-level hints (helps plan caching
+      // to determine whether or not to re-use the LogicalPlan that does not have physical
+      // plan information that planHints effect)
+      queryHints.put(name, stringValue)
+      args.asInstanceOf[Option[Seq[Expression]]] match {
+        case None => (name, "", Nil)
+        case Some(s) => (name, stringValue, s)
+      }
+    }
   }
 
   protected final def commentBody: Rule0 = rule {
     "*/" | ANY ~ commentBody
   }
 
-  /**
-   * Handle query hints including plan-level like joinType that are marked to be handled later.
-   */
-  protected def handleQueryHint(hint: String, hintValue: String): Unit = {
-    // check for a plan-level hint
-    QueryHint.get(hint, Consts.allowedPlanHints) match {
-      case Some(h) => h.get(hintValue) match {
-        case Some(v) => planHints.push(h -> v)
-        case None => throw new ParseException(s"Unknown hint name '$hintValue' for $hint. " +
-            s"Expected one of ${h.values.mkString(",")}")
-      }
-      case _ =>
-    }
-    // put all hints into the queryHints map including planHints (helps plan caching
-    // to determine whether or not to re-use the LogicalPlan that does not have
-    // physical plan information that planHints effect)
-    queryHints.put(hint, hintValue)
-  }
-
   protected final def commentBodyOrHint: Rule0 = rule {
-    '+' ~ (Consts.whitespace.* ~ capture(CharPredicate.Alpha ~
-        Consts.identifier.*) ~ Consts.whitespace.* ~
-        '(' ~ capture(noneOf(Consts.hintValueEnd).*) ~ ')' ~>
-        ((k: String, v: String) => handleQueryHint(k, v.trim))). + ~
-        commentBody |
+    '+' ~ (hintStatement + commaSep) ~> (_ => ()) ~ commentBody |
     commentBody
   }
 
   protected final def lineCommentOrHint: Rule0 = rule {
-    '+' ~ (Consts.space.* ~ capture(CharPredicate.Alpha ~
-        Consts.identifier.*) ~ Consts.space.* ~
-        '(' ~ capture(noneOf(Consts.lineHintEnd).*) ~ ')' ~>
-        ((k: String, v: String) => handleQueryHint(k, v.trim))). + ~
-        noneOf(Consts.lineCommentEnd).* |
+    '+' ~ (hintStatement + commaSep) ~> (_ => ()) ~ noneOf(Consts.lineCommentEnd).* |
     noneOf(Consts.lineCommentEnd).*
   }
 
@@ -119,8 +101,10 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def ws: Rule0 = rule {
     quiet(
       Consts.whitespace |
-      '-' ~ '-' ~ lineCommentOrHint |
-      '/' ~ '*' ~ (commentBodyOrHint | fail("unclosed comment"))
+      '-' ~ '-' ~ (test(hintsEnabled) ~ lineCommentOrHint |
+          test(!hintsEnabled) ~ !'+' ~ noneOf(Consts.lineCommentEnd).*) |
+      '/' ~ '*' ~ (test(hintsEnabled) ~ (commentBodyOrHint | fail("unclosed comment")) |
+          test(!hintsEnabled) ~ !'+' ~ (commentBody | fail("unclosed comment")))
     ).*
   }
 
@@ -148,16 +132,20 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def stringLiteral: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     capture('\'' ~ (noneOf("'\\") | "''" | '\\' ~ ANY).* ~ '\'') ~ ws ~> { (s: String) =>
-      val str = if (s.indexOf("''") >= 0) {
-        "'" + s.substring(1, s.length - 1).replace("''", "\\'") + "'"
-      } else s
-      if (escapedStringLiterals) str else ParserUtils.unescapeSQLString(str)
+      if (s.indexOf("''") >= 0) {
+        val str = s.substring(1, s.length - 1).replace("''", "\\'")
+        if (escapedStringLiterals) str else ParserUtils.unescapeSQLString("'" + str + "'")
+      }
+      else if (escapedStringLiterals) s.substring(1, s.length - 1)
+      else ParserUtils.unescapeSQLString(s)
     } |
     test(sparkCompatible) ~
         capture('"' ~ (noneOf("\"\\") | '\\' ~ ANY).* ~ '"') ~ ws ~> { (s: String) =>
       if (escapedStringLiterals) s.substring(1, s.length - 1) else ParserUtils.unescapeSQLString(s)
     }
   }
+
+  protected def primaryExpression: Rule1[Expression]
 
   final def keyword(k: Keyword): Rule0 = rule {
     atomic(ignoreCase(k.lower)) ~ delimiter
@@ -179,7 +167,7 @@ abstract class SnappyBaseParser extends Parser() {
   protected def start: Rule1[LogicalPlan]
 
   protected final def unquotedIdentifier: Rule1[String] = rule {
-    atomic(capture(Consts.alphaUnderscore ~ Consts.identifier.*)) ~ delimiter
+    atomic(capture(Consts.identStart ~ Consts.identifier.*)) ~ delimiter
   }
 
   /** all unquoted identifiers which disallows reserved keywords */
@@ -208,8 +196,8 @@ abstract class SnappyBaseParser extends Parser() {
   }
 
   protected final def identifierWithQuotedFlag: Rule1[String] = rule {
-    unreservedIdentifier ~> (() => isQuoted = false) |
-    quotedIdentifier ~> (() => isQuoted = true)
+    unreservedIdentifier ~> (() => quotedFlags = quotedFlags << 1) |
+    quotedIdentifier ~> (() => quotedFlags = (quotedFlags << 1) | 0x1)
   }
 
   /**
@@ -347,7 +335,8 @@ abstract class SnappyBaseParser extends Parser() {
   /** allow for first character of unquoted identifier to be a numeric */
   protected final def identifierExt1: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
-    atomic(capture(Consts.identifier. +)) ~ delimiter ~> { (s: String) =>
+    atomic(capture(CharPredicate.Digit.* ~ Consts.identStart ~ Consts.identifier.*)) ~
+        delimiter ~> { (s: String) =>
       val lcase = lower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
@@ -358,14 +347,14 @@ abstract class SnappyBaseParser extends Parser() {
   /** first character of unquoted identifier can be a numeric and also allows reserved keywords */
   protected final def identifierExt2: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
-    atomic(capture(Consts.identifier. +)) ~ delimiter ~>
+    atomic(capture(CharPredicate.Digit.* ~ Consts.identStart ~ Consts.identifier.*)) ~ delimiter ~>
         ((s: String) => if (caseSensitive) s else lower(s)) |
     quotedIdentifier
   }
 
   protected final def packageIdentifierPart: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
-    atomic(capture((Consts.identifier | Consts.hyphen | Consts.dot). +)) ~ ws ~> { (s: String) =>
+    atomic(capture(Consts.packageIdentifier. +)) ~ ws ~> { (s: String) =>
       val lcase = lower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
@@ -416,13 +405,10 @@ object SnappyParserConsts {
     '+', '-', '<', '=', '!', '>', '/', '(', ')', ',', ';', '%', '{', '}', ':',
     '[', ']', '.', '&', '|', '^', '~', '#')
   final val lineCommentEnd: String = "\n\r\f" + EOI
-  final val lineHintEnd: String = ")\n\r\f" + EOI
-  final val hintValueEnd: String = ")*" + EOI
   final val underscore: CharPredicate = CharPredicate('_')
-  final val dot: CharPredicate = CharPredicate('.')
-  final val hyphen: CharPredicate = CharPredicate('-')
   final val identifier: CharPredicate = CharPredicate.AlphaNum ++ underscore
-  final val alphaUnderscore: CharPredicate = CharPredicate.Alpha ++ underscore
+  final val identStart: CharPredicate = CharPredicate.Alpha ++ underscore
+  final val packageIdentifier: CharPredicate = identifier ++ CharPredicate('-', '.')
   final val plusOrMinus: CharPredicate = CharPredicate('+', '-')
   final val unaryOperator: CharPredicate = CharPredicate('+', '-', '~')
   /** arithmetic operators having the same precedence as multiplication */

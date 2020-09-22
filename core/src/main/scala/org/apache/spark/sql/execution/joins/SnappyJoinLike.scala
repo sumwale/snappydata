@@ -18,9 +18,10 @@ package org.apache.spark.sql.execution.joins
 
 import scala.annotation.tailrec
 
+import org.apache.spark.sql.SparkSupport
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.JoinType
-import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, ClusteredDistribution, Distribution, Partitioning, UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SnappyHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
@@ -30,7 +31,7 @@ import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
  * children to have subsets of join keys as partitioning columns
  * without introducing a shuffle.
  */
-trait SnappyJoinLike extends SparkPlan {
+trait SnappyJoinLike extends SparkPlan with SparkSupport {
 
   val leftKeys: Seq[Expression]
   val rightKeys: Seq[Expression]
@@ -43,8 +44,8 @@ trait SnappyJoinLike extends SparkPlan {
   override def requiredChildDistribution: Seq[Distribution] = {
     // if left or right side is already distributed on a subset of keys
     // then use the same partitioning (for the larger side to reduce exchange)
-    val leftClustered = ClusteredDistribution(leftKeys)
-    val rightClustered = ClusteredDistribution(rightKeys)
+    val leftClustered = internals.newHashClusteredDistribution(leftKeys)
+    val rightClustered = internals.newHashClusteredDistribution(rightKeys)
     val leftPartitioning = left.outputPartitioning
     val rightPartitioning = right.outputPartitioning
     // if either side is broadcast then return defaults
@@ -74,23 +75,24 @@ trait SnappyJoinLike extends SparkPlan {
           case Some((r, ri)) =>
             // check if key indices of both sides match
             if (li == ri) {
-              ClusteredDistribution(l) :: ClusteredDistribution(r) :: Nil
+              internals.newHashClusteredDistribution(l) ::
+                  internals.newHashClusteredDistribution(r) :: Nil
             } else {
               // choose the bigger plan to match distribution and reduce shuffle
               if (leftSizeInBytes > rightSizeInBytes) {
-                ClusteredDistribution(l) ::
-                    ClusteredDistribution(li.map(rightKeys.apply)) :: Nil
+                internals.newHashClusteredDistribution(l) ::
+                    internals.newHashClusteredDistribution(li.map(rightKeys.apply)) :: Nil
               } else {
-                ClusteredDistribution(ri.map(leftKeys.apply)) ::
-                    ClusteredDistribution(r) :: Nil
+                internals.newHashClusteredDistribution(ri.map(leftKeys.apply)) ::
+                    internals.newHashClusteredDistribution(r) :: Nil
               }
             }
-          case None => ClusteredDistribution(l) ::
-              ClusteredDistribution(li.map(rightKeys.apply)) :: Nil
+          case None => internals.newHashClusteredDistribution(l) ::
+              internals.newHashClusteredDistribution(li.map(rightKeys.apply)) :: Nil
         }
         case None => rightSubset match {
-          case Some((r, ri)) => ClusteredDistribution(ri.map(leftKeys.apply)) ::
-              ClusteredDistribution(r) :: Nil
+          case Some((r, ri)) => internals.newHashClusteredDistribution(ri.map(leftKeys.apply)) ::
+              internals.newHashClusteredDistribution(r) :: Nil
           case None => leftClustered :: rightClustered :: Nil
         }
       }
@@ -109,11 +111,11 @@ trait SnappyJoinLike extends SparkPlan {
     if (keys.length >= numColumns) {
       var combination: Seq[Expression] = null
       keys.indices.combinations(numColumns).collect {
-        case s if partitioning.satisfies(ClusteredDistribution {
+        case s if partitioning.satisfies(internals.newHashClusteredDistribution {
           combination = s.map(keys.apply)
           combination
         }) => (combination, s)
-        case s if partitioning.satisfies(ClusteredDistribution {
+        case s if partitioning.satisfies(internals.newHashClusteredDistribution {
           combination = unAlias(s.map(keys.apply), child)
           combination
         }) => (combination, s)

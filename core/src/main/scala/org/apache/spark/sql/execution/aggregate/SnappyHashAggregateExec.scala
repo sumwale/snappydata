@@ -480,12 +480,15 @@ case class SnappyHashAggregateExec(
       val resultVars = resultExpressions.map { e =>
         BindReferences.bindReference(e, inputAttrs).genCode(ctx)
       }
+      val evaluateNondeterministicResults =
+        evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
       s"""
        $evaluateKeyVars
        $evaluateBufferVars
        $evaluateAggResults
+       $evaluateNondeterministicResults
        ${consume(ctx, resultVars)}
-       """
+      """
 
     } else if (modes.contains(Partial) || modes.contains(PartialMerge)) {
       // Combined grouping keys and aggregate values in buffer
@@ -495,10 +498,15 @@ case class SnappyHashAggregateExec(
       // generate result based on grouping key
       ctx.INPUT_ROW = null
       ctx.currentVars = keyBufferVars.take(bufferIndex)
-      val eval = resultExpressions.map { e =>
+      val resultVars = resultExpressions.map { e =>
         BindReferences.bindReference(e, groupingAttributes).genCode(ctx)
       }
-      consume(ctx, eval)
+      val evaluateNondeterministicResults =
+        evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
+      s"""
+        $evaluateNondeterministicResults
+        ${consume(ctx, resultVars)}
+      """
     }
   }
 
@@ -542,6 +550,8 @@ case class SnappyHashAggregateExec(
       val resultVars = resultExpressions.map { e =>
         BindReferences.bindReference(e, inputAttrs).genCode(ctx)
       }
+      val evaluateNondeterministicResults =
+        evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
       s"""
        ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
         byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
@@ -550,8 +560,9 @@ case class SnappyHashAggregateExec(
         byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits)}
        $evaluateBufferVars
        $evaluateAggResults
+       $evaluateNondeterministicResults
        ${consume(ctx, resultVars)}
-       """
+      """
 
     } else if (modes.contains(Partial) || modes.contains(PartialMerge)) {
       // Combined grouping keys and aggregate values in buffer
@@ -590,13 +601,16 @@ case class SnappyHashAggregateExec(
       val resultVars = resultExpressions.map { e =>
         BindReferences.bindReference(e, groupingAttributes).genCode(ctx)
       }
+      val evaluateNondeterministicResults =
+        evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
 
       s"""
        ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
         byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
        $evaluateKeyVars
+       $evaluateNondeterministicResults
        ${consume(ctx, resultVars)}
-       """
+      """
     }
   }
 
@@ -1005,6 +1019,17 @@ case class SnappyHashAggregateExec(
         }
       }
     """
+  }
+
+  /**
+   * [SPARK-26572] evaluate non-deterministic expressions before consume.
+   */
+  private def evaluateNondeterministicExpressions(
+      attributes: Seq[Attribute],
+      variables: Seq[ExprCode],
+      expressions: Seq[NamedExpression]): String = {
+    val nondeterministicAttrs = expressions.filterNot(_.deterministic).map(_.toAttribute)
+    evaluateRequiredVariables(attributes, variables, AttributeSet(nondeterministicAttrs))
   }
 
   private def doProduceWithKeys(ctx: CodegenContext): String = {

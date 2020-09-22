@@ -22,7 +22,7 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 class SnappyFilteredScanSuite extends FilteredScanSuite
     with SharedSnappySessionContext with SnappySparkTestUtil {
 
-  override def ignored: Seq[String] = Seq(
+  override def skipped: Seq[String] = Seq(
     // disabled because SnappySession converts filter to a more efficient DynamicInSet
     // which is not handled in SimpleFilteredScan.unhandledFilters
     "PushDown Returns 3: SELECT a FROM oneToTenFiltered WHERE a + b > 9 AND b < 16 " +

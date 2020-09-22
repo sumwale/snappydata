@@ -317,6 +317,15 @@ class SnappyEmbeddedHiveCatalog23(_conf: SparkConf, _hadoopConf: Configuration,
   override def doAlterTableStats(schema: String, table: String,
       stats: Option[CatalogStatistics]): Unit = {
     withHiveExceptionHandling(super.doAlterTableStats(schema, table, stats))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
+  }
+
+  override def doAlterTableDataSchema(schema: String, table: String,
+      newSchema: StructType): Unit = {
+    withHiveExceptionHandling(super.doAlterTableDataSchema(schema, table, newSchema))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
   }
 
   override def loadDynamicPartitions(schema: String, table: String, loadPath: String,

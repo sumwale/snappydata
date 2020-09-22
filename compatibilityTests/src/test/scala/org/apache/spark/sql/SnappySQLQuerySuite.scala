@@ -41,12 +41,6 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 class SnappySQLQuerySuite extends SQLQuerySuite with
     SharedSnappySessionContext with SnappySparkTestUtil {
 
-  override def ignored: Seq[String] = Seq(
-    // TODO: these two need to be fixed by moving ParamLiteral conversion after optimization
-    "Eliminate noop ordinal ORDER BY",
-    "SPARK-16644: Aggregate should not put aggregate expressions to constraints"
-  )
-
   /**
    * override to ensure that SnappyHashAggregateExec is present rather than Spark's
    * HashAggregateExec; does not include the loose className.contains check in base class

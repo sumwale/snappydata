@@ -39,7 +39,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.catalyst.json.JSONOptions
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.sql.catalyst.plans.physical.{Distribution, HashClusteredDistribution, Partitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.catalyst.{AccessUtils, FunctionIdentifier, InternalRow, TableIdentifier}
@@ -306,8 +306,13 @@ abstract class Spark23_4_Internals extends SparkInternals {
   }
 
   override def newLogicalPlanWithHints(child: LogicalPlan,
-      hints: Map[QueryHint.Type, HintName.Type]): LogicalPlan = {
-    new ResolvedPlanWithHints23(child, hints)
+      hints: Map[String, String]): LogicalPlan = {
+    new ResolvedPlanWithHints23(child, newCaseInsensitiveMap(hints))
+  }
+
+  override def newUnresolvedHint(name: String, parameters: Seq[Any],
+      child: LogicalPlan): LogicalPlan = {
+    UnresolvedHint(name, parameters, child)
   }
 
   override def newTableSample(lowerBound: Double, upperBound: Double, withReplacement: Boolean,
@@ -317,11 +322,11 @@ abstract class Spark23_4_Internals extends SparkInternals {
 
   override def isHintPlan(plan: LogicalPlan): Boolean = plan.isInstanceOf[ResolvedHint]
 
-  override def getHints(plan: LogicalPlan): Map[QueryHint.Type, HintName.Type] = plan match {
+  override def getHints(plan: LogicalPlan): Map[String, String] = plan match {
     case p: ResolvedPlanWithHints23 => p.allHints
     case _: ResolvedHint =>
-      // only broadcast supported
-      Map(QueryHint.JoinType -> HintName.JoinType_Broadcast)
+      // only broadcast supported by Spark's ResolveHint
+      newCaseInsensitiveMap(Map(QueryHint.JoinType.name -> HintName.JoinType_Broadcast.names.head))
     case _ => Map.empty
   }
 
@@ -449,7 +454,7 @@ abstract class Spark23_4_Internals extends SparkInternals {
   override def alterFunction(externalCatalog: ExternalCatalog, schema: String,
       function: CatalogFunction): Unit = externalCatalog.alterFunction(schema, function)
 
-  override def lookupDataSource(provider: String, conf: => SQLConf): Class[_] =
+  override protected def basicLookupDataSource(provider: String, conf: => SQLConf): Class[_] =
     DataSource.lookupDataSource(provider, conf)
 
   override def newShuffleExchange(newPartitioning: Partitioning, child: SparkPlan): Exchange = {
@@ -512,6 +517,11 @@ abstract class Spark23_4_Internals extends SparkInternals {
 
   override def newTruncateTableCommand(tableName: TableIdentifier): Option[RunnableCommand] = {
     Some(TruncateTableCommand(tableName, partitionSpec = None))
+  }
+
+  override def newHashClusteredDistribution(expressions: Seq[Expression],
+      requiredNumPartitions: Option[Int]): Distribution = {
+    HashClusteredDistribution(expressions, requiredNumPartitions)
   }
 }
 

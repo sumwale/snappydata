@@ -2274,7 +2274,7 @@ object SnappySession extends Logging {
   private def executeCollect(session: SnappySession, qe: QueryExecution,
       plan: SparkPlan): Array[InternalRow] = {
     CachedDataFrame.withCallback(session, df = null, qe, "executeCollect")(
-      CachedDataFrame.toTimedCallback(_ => plan.executeCollect()))
+      CachedDataFrame.timedCallback(_ => plan.executeCollect()))
   }
 
   private def evaluatePlan(qe: QueryExecution, session: SnappySession, sqlShortText: String,

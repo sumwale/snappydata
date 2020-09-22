@@ -22,16 +22,16 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 class SnappyOptimizeMetadataOnlyQuerySuite extends OptimizeMetadataOnlyQuerySuite
     with SharedSnappySessionContext with SnappySparkTestUtil {
 
-  override def excluded: Seq[String] = Seq(
-    // takes too long to run with hive metastore so using a shortened test below
+  override def overridden: Seq[String] = Seq(
+    // takes long to run with SD's hive metastore so using an abridged version below
     "SPARK-21884 Fix StackOverflowError on MetadataOnlyQuery"
   )
 
-  test("SPARK-21884 Fix StackOverflowError on MetadataOnlyQuery (shortened)") {
-    withTable("t_100") {
-      sql("CREATE TABLE t_100 (a INT, p INT) USING PARQUET PARTITIONED BY (p)")
-      (1 to 100).foreach(p => sql(s"ALTER TABLE t_100 ADD PARTITION (p=$p)"))
-      sql("SELECT COUNT(DISTINCT p) FROM t_100").collect()
+  test("SPARK-21884 Fix StackOverflowError on MetadataOnlyQuery (abridged)") {
+    withTable("t_200") {
+      sql("CREATE TABLE t_200 (a INT, p INT) USING PARQUET PARTITIONED BY (p)")
+      (1 to 200).foreach(p => sql(s"ALTER TABLE t_200 ADD PARTITION (p=$p)"))
+      sql("SELECT COUNT(DISTINCT p) FROM t_200").collect()
     }
   }
 }

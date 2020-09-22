@@ -179,7 +179,7 @@ private[sql] object PartitionedPhysicalScan extends SparkSupport {
           }
         })
         assert(columnScan.outputPartitioning.satisfies(
-          ClusteredDistribution(columnScan.partitionColumns)))
+          internals.newHashClusteredDistribution(columnScan.partitionColumns)))
         ZipPartitionScan(columnScan, columnScan.partitionColumns,
           rowBufferScan, otherPartKeys)
       case c: BaseColumnFormatRelation =>
@@ -359,8 +359,10 @@ private[sql] final case class ZipPartitionScan(basePlan: CodegenSupport,
 
   override def children: Seq[SparkPlan] = basePlan :: withShuffle :: Nil
 
-  override def requiredChildDistribution: Seq[Distribution] =
-    ClusteredDistribution(basePartKeys) :: ClusteredDistribution(otherPartKeys) :: Nil
+  override def requiredChildDistribution: Seq[Distribution] = {
+    internals.newHashClusteredDistribution(basePartKeys) ::
+        internals.newHashClusteredDistribution(otherPartKeys) :: Nil
+  }
 
   override def inputRDDs(): Seq[RDD[InternalRow]] =
     basePlan.inputRDDs ++ Some(withShuffle.execute())

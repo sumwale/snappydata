@@ -18,8 +18,9 @@ package org.apache.spark.sql
 
 import java.lang.reflect.Method
 
+import com.google.common.cache.CacheBuilder
+import io.snappydata.Property
 import io.snappydata.sql.catalog.SnappyExternalCatalog
-import io.snappydata.{HintName, QueryHint}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.internal.config.ConfigBuilder
@@ -32,7 +33,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.{CodeAndComment, Codege
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, ExprId, Expression, ExpressionInfo, FrameType, Generator, NamedExpression, NullOrdering, SortDirection, SortOrder, SpecifiedWindowFrame}
 import org.apache.spark.sql.catalyst.json.JSONOptions
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.sql.catalyst.plans.physical.{Distribution, Partitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, TableIdentifier}
 import org.apache.spark.sql.execution.bootstrap.{ApproxColumnExtractor, Tag, TaggedAlias, TaggedAttribute, TransformableTag}
@@ -54,7 +55,8 @@ import org.apache.spark.status.api.v1.RDDStorageInfo
 import org.apache.spark.streaming.SnappyStreamingContext
 import org.apache.spark.streaming.dstream.DStream
 import org.apache.spark.ui.WebUITab
-import org.apache.spark.{Logging, SparkConf, SparkContext}
+import org.apache.spark.util.Utils
+import org.apache.spark.{Logging, SparkConf, SparkContext, SparkEnv}
 
 /**
  * Common interface for Spark internal API used by the core module.
@@ -75,8 +77,18 @@ trait SparkInternals extends Logging {
    */
   lazy val EMPTY_RDD = new EmptyRDD[Any](SparkContext.getActive.get)
 
+  protected final lazy val dataSourceCache =
+    CacheBuilder.newBuilder().maximumSize(dsCacheSize).build[(String, ClassLoader), Class[_]]()
+
   if (version != SparkSupport.DEFAULT_VERSION) {
     logInfo(s"SnappyData: loading support for Spark $version")
+  }
+
+  protected final def dsCacheSize: Int = {
+    SparkEnv.get match {
+      case null => Property.DataSourceCacheSize.defaultValue.get
+      case env => Property.DataSourceCacheSize.get(env.conf)
+    }
   }
 
   /**
@@ -429,8 +441,12 @@ trait SparkInternals extends Logging {
   /**
    * Create a new wrapper [[LogicalPlan]] that encapsulates an arbitrary set of hints.
    */
-  def newLogicalPlanWithHints(child: LogicalPlan,
-      hints: Map[QueryHint.Type, HintName.Type]): LogicalPlan
+  def newLogicalPlanWithHints(child: LogicalPlan, hints: Map[String, String]): LogicalPlan
+
+  /**
+   * Create a new `UnresolvedHint` plan if available in this version of Spark else return `child`.
+   */
+  def newUnresolvedHint(name: String, parameters: Seq[Any], child: LogicalPlan): LogicalPlan
 
   /**
    * Create a new TABLESAMPLE operator.
@@ -446,7 +462,7 @@ trait SparkInternals extends Logging {
   /**
    * If the given plan encapsulates query hints, then return the hint type and name pairs.
    */
-  def getHints(plan: LogicalPlan): Map[QueryHint.Type, HintName.Type]
+  def getHints(plan: LogicalPlan): Map[String, String]
 
   /**
    * Return true if current plan has been explicitly marked for broadcast and false otherwise.
@@ -599,8 +615,27 @@ trait SparkInternals extends Logging {
    */
   def newSmartConnectorExternalCatalog(session: SparkSession): SnappyExternalCatalog
 
-  /** Lookup the data source for a given provider. */
-  def lookupDataSource(provider: String, conf: => SQLConf): Class[_]
+  /** Lookup the data source for a given provider (with caching). */
+  final def lookupDataSource(provider: String, conf: => SQLConf): Class[_] = {
+    // account for SQLConf overrides that may differ across sessions
+    val providerKey = provider.toLowerCase match {
+      case "orc" => "orc:" + conf.getConfString("spark.sql.orc.impl", "native")
+      case "com.databricks.spark.avro" => "com.databricks.spark.avro:" +
+          conf.getConfString("spark.sql.legacy.replaceDatabricksSparkAvro.enabled", "true")
+      case p => p
+    }
+    val key = providerKey -> Utils.getContextOrSparkClassLoader
+    // avoid callable object creation if possible
+    dataSourceCache.getIfPresent(key) match {
+      case null => dataSourceCache.get(key, new java.util.concurrent.Callable[Class[_]] {
+        override def call(): Class[_] = basicLookupDataSource(provider, conf)
+      })
+      case c => c
+    }
+  }
+
+  /** Invoke Spark's `DataSource.lookupDataSource` method. */
+  protected def basicLookupDataSource(provider: String, conf: => SQLConf): Class[_]
 
   /**
    * Create a new shuffle exchange plan.
@@ -791,6 +826,15 @@ trait SparkInternals extends Logging {
    */
   def addStringPromotionRules(rules: Seq[Rule[LogicalPlan]],
       analyzer: SnappyAnalyzer, conf: SQLConf): Seq[Rule[LogicalPlan]]
+
+  /**
+   * SPARK-21865 changed the way distribution/partitioning semantics works requiring
+   * join and similar plans to use HashClusteredDistribution instead of ClusteredDistribution
+   * else there might be a mismatch between required child distribution and partitioning
+   * since latter no longer checks for `compatibleWith` with former.
+   */
+  def newHashClusteredDistribution(expressions: Seq[Expression],
+      requiredNumPartitions: Option[Int] = None): Distribution
 
   /**
    * Create table definition in the catalog.

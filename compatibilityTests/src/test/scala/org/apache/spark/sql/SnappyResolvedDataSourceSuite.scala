@@ -23,7 +23,7 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 class SnappyResolvedDataSourceSuite extends ResolvedDataSourceSuite
     with SharedSnappySessionContext with SnappySparkTestUtil {
 
-  override def excluded: Seq[String] = Seq(
+  override def overridden: Seq[String] = Seq(
     // test run includes kafka module by default
     "kafka: show deploy guide for loading the external kafka module"
   )

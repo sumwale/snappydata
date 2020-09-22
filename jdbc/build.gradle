@@ -70,7 +70,6 @@ scalaTest {
 }
 
 test.dependsOn ':cleanJUnit'
-check.dependsOn test, scalaTest, dunitTest
 
 archivesBaseName = 'snappydata-jdbc_' + scalaBinaryVersion
 jar.classifier = 'only'

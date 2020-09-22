@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.internal
 
-import io.snappydata.{HintName, QueryHint}
-
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression}
@@ -32,8 +30,8 @@ import org.apache.spark.sql.types.StructType
  * An extended version of [[BroadcastHint]] to encapsulate any kind of hint rather
  * than just broadcast.
  */
-class PlanWithHints21(_child: LogicalPlan,
-    val allHints: Map[QueryHint.Type, HintName.Type]) extends BroadcastHint(_child) {
+class PlanWithHints21(_child: LogicalPlan, val allHints: Map[String, String])
+    extends BroadcastHint(_child) {
 
   override def productArity: Int = 2
 

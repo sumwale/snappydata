@@ -22,7 +22,7 @@ import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUti
 class SnappyCreateTableAsSelectSuite extends CreateTableAsSelectSuite
     with SharedSnappySessionContext with SnappySparkTestUtil {
 
-  override def excluded: Seq[String] = Seq(
+  override def overridden: Seq[String] = Seq(
     // SnappyData allows this syntax by design
     "disallows CREATE EXTERNAL TABLE ... USING ... AS query"
   )

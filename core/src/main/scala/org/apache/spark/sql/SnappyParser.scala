@@ -71,7 +71,7 @@ class SnappyParser(session: SnappySession)
   final def questionMarkCounter: Int = _questionMarkCounter
 
   private[sql] final def input_=(in: ParserInput): Unit = {
-    clearQueryHints()
+    if (!queryHints.isEmpty) queryHints.clear()
     _input = in
     clearConstants()
     _questionMarkCounter = 0
@@ -179,7 +179,7 @@ class SnappyParser(session: SnappySession)
     }
   }
 
-  private def updatePerTableQueryHint(tableIdent: TableIdentifier,
+  private def updatePerTableIndexHint(tableIdent: TableIdentifier,
       optAlias: Option[(String, Seq[String])]): Unit = {
     if (queryHints.isEmpty) return
     val indexHint = queryHints.remove(QueryHint.Index.toString)
@@ -192,7 +192,7 @@ class SnappyParser(session: SnappySession)
     }
   }
 
-  private final def assertNoQueryHint(plan: LogicalPlan,
+  private final def assertNoIndexHint(plan: LogicalPlan,
       optAlias: Option[(String, Seq[String])]): Unit = {
     if (!queryHints.isEmpty) {
       val hintStr = QueryHint.Index.toString
@@ -366,12 +366,16 @@ class SnappyParser(session: SnappySession)
   }
 
   final def namedExpression: Rule1[Expression] = rule {
-    expression ~ (AS ~ (identifierExt2 | identifierList) | (strictIdentifier | identifierList)).? ~>
-        ((e: Expression, a: Any) => a match {
+    push(_inProjection) ~> (() => _inProjection = true) ~ expression ~ (AS ~ (identifierExt2 |
+        identifierList) | (strictIdentifier | identifierList)).? ~> {
+      (p: Boolean, e: Expression, a: Any) =>
+        _inProjection = p
+        a match {
           case None => e
           case Some(name) if name.isInstanceOf[String] => Alias(e, name.asInstanceOf[String])()
           case Some(names) => MultiAlias(e, names.asInstanceOf[Seq[String]])
-        })
+        }
+    }
   }
 
   final def namedExpressionSeq: Rule1[Seq[Expression]] = rule {
@@ -448,7 +452,34 @@ class SnappyParser(session: SnappySession)
       })
   }
 
-  protected final def primaryExpression: Rule1[Expression] = rule {
+  private final def toUnresolvedRegex(ids: Seq[String], idLen: Int): Expression = {
+    if (idLen == 1) internals.newUnresolvedRegex(ids.head, None, caseSensitive)
+    else {
+      val name = ids.dropRight(1).map(
+        n => if (n.contains(".")) s"`$n`" else n).mkString(".")
+      internals.newUnresolvedRegex(ids(idLen - 1), Some(name), caseSensitive)
+    }
+  }
+
+  private final def toUnresolvedExtractValue(e: Expression, a: String): Expression =
+    UnresolvedExtractValue(e, newLiteral(UTF8String.fromString(a), StringType))
+
+  private final def toUnresolvedAttrOrRegex(ids: Seq[String], idLen: Int): Expression = {
+    assert(idLen <= 3)
+    if (quotedRegexColumnNames && _inProjection) {
+      val flags = quotedFlags & ((0x1 << idLen) - 1) // trim to idLen
+      if (flags != 0) {
+        // if only last one is non-zero then this UnresolvedRegex else case of extract
+        if (flags == 0x1) toUnresolvedRegex(ids, idLen)
+        else {
+          val pos = java.lang.Integer.numberOfLeadingZeros(flags) - (32 - idLen) + 1
+          ids.drop(pos).foldLeft(toUnresolvedRegex(ids.take(pos), pos))(toUnresolvedExtractValue)
+        }
+      } else UnresolvedAttribute(ids)
+    } else UnresolvedAttribute(ids)
+  }
+
+  override protected final def primaryExpression: Rule1[Expression] = rule {
     literal |
     questionMark |
     '*' ~ ws ~> (() => UnresolvedStar(None)) |
@@ -553,10 +584,11 @@ class SnappyParser(session: SnappySession)
         // noinspection ScalaUnnecessaryParentheses
         MATCH ~> { (ids: Seq[String]) =>
           val idLen = ids.length
-          if (idLen <= 2 && quotedRegexColumnNames && isQuoted && _inProjection) {
-            if (idLen == 1) internals.newUnresolvedRegex(ids.head, None, caseSensitive)
-            else internals.newUnresolvedRegex(ids(1), Some(ids.head), caseSensitive)
-          } else UnresolvedAttribute(ids)
+          if (idLen <= 3) toUnresolvedAttrOrRegex(ids, idLen)
+          else {
+            // case of extract since qualified column names can have max 3 parts
+            ids.drop(3).foldLeft(toUnresolvedAttrOrRegex(ids.take(3), 3))(toUnresolvedExtractValue)
+          }
         }
       )
     ) |
@@ -604,8 +636,7 @@ class SnappyParser(session: SnappySession)
   private final def resolveExpression: Rule1[Expression] = rule {
     primaryExpression ~ (
         '[' ~ ws ~ valueExpression ~ ']' ~ ws ~> UnresolvedExtractValue |
-        '.' ~ ws ~ identifier ~> ((base: Expression, attr: String) =>
-          UnresolvedExtractValue(base, newLiteral(UTF8String.fromString(attr), StringType)))
+        '.' ~ ws ~ identifier ~> ((e: Expression, a: String) => toUnresolvedExtractValue(e, a))
     ).*
   }
 
@@ -869,6 +900,11 @@ class SnappyParser(session: SnappySession)
         })
   }
 
+  protected final def hint: Rule1[Seq[(String, String, Seq[Expression])]] = rule {
+    "/*+" ~ Consts.whitespace.* ~ (hintStatement + commaSep) ~ commentBody ~ ws |
+    "--+" ~ Consts.space.* ~ (hintStatement + commaSep) ~ noneOf(Consts.lineCommentEnd).* ~ ws
+  }
+
   /**
    * Table name optionally followed by column names in parentheses that can appear in
    * queries or INSERT/PUT. In queries when column names are present, then it is interpreted
@@ -878,12 +914,21 @@ class SnappyParser(session: SnappySession)
    * using null/default values.
    */
   protected final def baseTable: Rule1[LogicalPlan] = rule {
-    tableIdentifier ~ (
-        expressionList ~> ((ident: TableIdentifier, e: Seq[Expression]) =>
-          internals.newUnresolvedTableValuedFunction(ident.unquotedString, e, Nil)) |
-        // noinspection ScalaUnnecessaryParentheses
-        MATCH ~> ((ident: TableIdentifier) => UnresolvedRelation(ident))
-    )
+    push(disableHints) ~ tableIdentifier ~ expressionList.? ~ hint.* ~> { (enabled: Boolean,
+        ident: TableIdentifier, e: Any, h: Any) =>
+      hintsEnabled = enabled
+      val tablePlan = e.asInstanceOf[Option[Seq[Expression]]] match {
+        case None => UnresolvedRelation(ident)
+        case Some(exprs) =>
+          internals.newUnresolvedTableValuedFunction(ident.unquotedString, exprs, Nil)
+      }
+      val hints = h.asInstanceOf[Seq[Seq[(String, String, Seq[Expression])]]]
+      if (hints.isEmpty) tablePlan
+      else {
+        internals.newLogicalPlanWithHints(tablePlan,
+          hints.flatMap(h => h.map(t => t._1 -> t._2)).toMap)
+      }
+    }
   }
 
   protected final def inlineTable: Rule1[LogicalPlan] = rule {
@@ -924,7 +969,7 @@ class SnappyParser(session: SnappySession)
     case None => plan
     case Some((alias, columnAliases)) =>
       val tableIdent = u.tableIdentifier
-      updatePerTableQueryHint(tableIdent, aliasSpec)
+      updatePerTableIndexHint(tableIdent, aliasSpec)
       internals.newUnresolvedColumnAliases(columnAliases, internals.newSubqueryAlias(alias, plan))
   }
 
@@ -951,7 +996,7 @@ class SnappyParser(session: SnappySession)
         case u: UnresolvedRelation =>
           handleRelationAlias(optAlias, u, withSample(sample, withWindow(window, u)))
         case u: UnresolvedTableValuedFunction =>
-          assertNoQueryHint(u, optAlias)
+          assertNoIndexHint(u, optAlias)
           if (optAlias.isEmpty) withSample(sample, withWindow(window, u))
           else {
             internals.newSubqueryAlias(optAlias.get._1,
@@ -959,7 +1004,7 @@ class SnappyParser(session: SnappySession)
                 u.functionName, u.functionArgs, optAlias.get._2))))
           }
         case _ =>
-          assertNoQueryHint(rel, optAlias)
+          assertNoIndexHint(rel, optAlias)
           handleSubqueryAlias(optAlias, withSample(sample, withWindow(window, rel)))
       }
     }
@@ -1104,36 +1149,21 @@ class SnappyParser(session: SnappySession)
     )
   }
 
-  protected final def withHints(plan: LogicalPlan): LogicalPlan = {
-    if (hasPlanHints) {
-      var newPlan = plan
-      val planHints = this.planHints
-      while (planHints.size() > 0) {
-        newPlan match {
-          case p if internals.isHintPlan(p) =>
-            newPlan = internals.newLogicalPlanWithHints(p, internals.getHints(p) + planHints.pop())
-          case _ => newPlan = internals.newLogicalPlanWithHints(plan, Map(planHints.pop()))
-        }
-      }
-      newPlan
-    } else plan
-  }
-
   protected final def relation: Rule1[LogicalPlan] = rule {
-    relationPrimary ~> (plan => withHints(plan)) ~ (
-        joinType.? ~ JOIN ~ (relationPrimary ~> (plan => withHints(plan))) ~ (
+    relationPrimary ~ (
+        joinType.? ~ JOIN ~ relationPrimary ~ (
             ON ~ expression ~> ((l: LogicalPlan, t: Any, r: LogicalPlan, e: Expression) =>
-              withHints(Join(l, r, t.asInstanceOf[Option[JoinType]].getOrElse(Inner), Some(e)))) |
+              Join(l, r, t.asInstanceOf[Option[JoinType]].getOrElse(Inner), Some(e))) |
             USING ~ identifierList ~>
                 ((l: LogicalPlan, t: Any, r: LogicalPlan, ids: Any) =>
-                  withHints(Join(l, r, UsingJoin(t.asInstanceOf[Option[JoinType]]
-                      .getOrElse(Inner), ids.asInstanceOf[Seq[String]]), None))) |
+                  Join(l, r, UsingJoin(t.asInstanceOf[Option[JoinType]]
+                      .getOrElse(Inner), ids.asInstanceOf[Seq[String]]), None)) |
             MATCH ~> ((l: LogicalPlan, t: Option[JoinType], r: LogicalPlan) =>
-              withHints(Join(l, r, t.getOrElse(Inner), None)))
+              Join(l, r, t.getOrElse(Inner), None))
         ) |
-        NATURAL ~ joinType.? ~ JOIN ~ (relationPrimary ~> (plan => withHints(plan))) ~>
-            ((l: LogicalPlan, t: Any, r: LogicalPlan) => withHints(Join(l, r,
-              NaturalJoin(t.asInstanceOf[Option[JoinType]].getOrElse(Inner)), None)))
+        NATURAL ~ joinType.? ~ JOIN ~ relationPrimary ~>
+            ((l: LogicalPlan, t: Any, r: LogicalPlan) => Join(l, r,
+              NaturalJoin(t.asInstanceOf[Option[JoinType]].getOrElse(Inner)), None))
     ).*
   }
 
@@ -1173,13 +1203,14 @@ class SnappyParser(session: SnappySession)
   }
 
   protected def querySpecification: Rule1[LogicalPlan] = rule {
-    SELECT ~ (DISTINCT ~ push(true)).? ~
+    push(disableHints) ~ SELECT ~ hint.* ~ (DISTINCT ~ push(true)).? ~
     PROJECTION_BEGIN ~ namedExpressionSeq ~ PROJECTION_END ~
     fromClause.? ~
     CACHE_LITERAL_BEGIN ~ (WHERE ~ expression).? ~
     groupBy.? ~
-    (HAVING ~ expression).? ~ SELECT_STMT_END ~> { (d: Any, p: Seq[Expression], f: Any, w: Any,
-        g: Any, h: Any) =>
+    (HAVING ~ expression).? ~ SELECT_STMT_END ~> { (b: Boolean, hints: Any, d: Any,
+        p: Seq[Expression], f: Any, w: Any, g: Any, h: Any) =>
+      hintsEnabled = b
       val base = f match {
         case Some(plan) =>
           if (_fromRelations.nonEmpty) {
@@ -1232,9 +1263,15 @@ class SnappyParser(session: SnappySession)
           }
           internals.newUnresolvedHaving(predicate, withProjection)
       }
-      d match {
+      val withDistinct = d match {
         case None => withHaving
         case Some(_) => Distinct(withHaving)
+      }
+      hints.asInstanceOf[Seq[Seq[(String, String, Seq[Expression])]]] match {
+        case s if s.isEmpty => withDistinct
+        case s =>
+          s.foldRight(withDistinct)((hs, plan) =>
+            hs.foldRight(plan)((h, p) => internals.newUnresolvedHint(h._1, h._3, p)))
       }
     }
   }

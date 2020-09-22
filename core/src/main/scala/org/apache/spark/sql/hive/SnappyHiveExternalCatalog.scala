@@ -733,22 +733,30 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
   override def createPartitions(schema: String, table: String, parts: Seq[CatalogTablePartition],
       ignoreIfExists: Boolean): Unit = {
     withHiveExceptionHandling(super.createPartitions(schema, table, parts, ignoreIfExists))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
   }
 
   override def dropPartitions(schema: String, table: String, parts: Seq[TablePartitionSpec],
       ignoreIfNotExists: Boolean, purge: Boolean, retainData: Boolean): Unit = {
     withHiveExceptionHandling(super.dropPartitions(schema, table, parts, ignoreIfNotExists,
       purge, retainData))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
   }
 
   override def renamePartitions(schema: String, table: String, specs: Seq[TablePartitionSpec],
       newSpecs: Seq[TablePartitionSpec]): Unit = {
     withHiveExceptionHandling(super.renamePartitions(schema, table, specs, newSpecs))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
   }
 
   override def alterPartitions(schema: String, table: String,
       parts: Seq[CatalogTablePartition]): Unit = {
     withHiveExceptionHandling(super.alterPartitions(schema, table, parts))
+
+    registerCatalogSchemaChange(schema -> table :: Nil)
   }
 
   override def loadPartition(schema: String, table: String, loadPath: String,

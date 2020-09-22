@@ -31,14 +31,16 @@ trait SnappySparkTestUtil extends SparkFunSuite {
     new File(dirName).mkdir()
   }
 
-  def excluded: Seq[String] = Nil
+  /** tests which have alternate versions for SnappyData due to change in semantics */
+  def overridden: Seq[String] = Nil
 
-  def ignored: Seq[String] = Nil
+  /** tests that fail in SnappyData by design (or due to compatibility bugs) */
+  def skipped: Seq[String] = Nil
 
   override protected def test(testName: String, testTags: Tag*)(testFun: => Any /* Assertion */)
       (implicit pos: org.scalactic.source.Position): Unit = {
-    if (!excluded.contains(testName)) {
-      if (ignored.contains(testName)) {
+    if (!overridden.contains(testName)) {
+      if (skipped.contains(testName)) {
         super.ignore(testName, testTags: _*)(testFun)
       } else {
         super.test(testName, testTags: _*)(testFun)

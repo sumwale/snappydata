@@ -278,7 +278,7 @@ object TAQTest extends Logging with Assertions {
         .setIfMissing("spark.master", s"local[$cores]")
         .setAppName("microbenchmark")
         .set("snappydata.store.critical-heap-percentage", "95")
-        .set("snappydata.store.memory-size", "1200m")
+        .set("snappydata.store.memory-size", "1500m")
         .set("spark.memory.manager", classOf[SnappyUnifiedMemoryManager].getName)
         .set("spark.serializer", "org.apache.spark.serializer.PooledKryoSerializer")
         .set("spark.closure.serializer", "org.apache.spark.serializer.PooledKryoSerializer")
