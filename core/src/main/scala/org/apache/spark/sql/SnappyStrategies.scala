@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.catalyst.expressions.{Alias, Expression, Literal, NamedExpression, RowOrdering, SubqueryExpression}
 import org.apache.spark.sql.catalyst.planning.{ExtractEquiJoinKeys, PhysicalAggregation}
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, HashPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.ClusteredDistribution
 import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, Inner, JoinType, LeftAnti, LeftOuter, LeftSemi, RightOuter}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.collection.Utils
@@ -133,7 +133,7 @@ private[sql] trait SnappyStrategies {
     }
 
     def apply(plan: LogicalPlan): Seq[SparkPlan] =
-      if (isDisabled || snappySession.disableHashJoin) {
+      if (isDisabled || snappySession.disableHashJoin || !conf.wholeStageEnabled) {
         Nil
       } else {
         plan match {
@@ -346,8 +346,8 @@ private[sql] object JoinStrategy extends SparkSupport {
 
   def hasBroadcastHint(hints: Map[String, String]): Boolean = {
     // hints should be a case-insensitive map
-    assert(hints.getClass.getName.contains("CaseInsensitiveMap"))
-    hints.get(QueryHint.JoinType.name) match {
+    assert(hints.isEmpty || hints.getClass.getName.contains("CaseInsensitiveMap"))
+    hints.get(QueryHint.JoinType.lower) match {
       case Some(h) => HintName.JoinType_Broadcast.names.exists(h.equalsIgnoreCase)
       case None => false
     }
@@ -370,12 +370,12 @@ private[sql] object JoinStrategy extends SparkSupport {
     case p if internals.isHintPlan(p) =>
       val hints = internals.getHints(p)
       // hints should be a case-insensitive map
-      assert(hints.getClass.getName.contains("CaseInsensitiveMap"))
-      hints.get(QueryHint.JoinType.name) match {
+      assert(hints.isEmpty || hints.getClass.getName.contains("CaseInsensitiveMap"))
+      hints.get(QueryHint.JoinType.lower) match {
         case None => None
         case Some(v) => QueryHint.JoinType.get(v)
       }
-    case _: Filter | _: Project | _: LocalLimit =>
+    case _: Filter | _: Project | _: SubqueryAlias | _: LocalLimit =>
       getJoinHint(plan.asInstanceOf[UnaryNode].child)
     case _ => None
   }
@@ -803,9 +803,8 @@ case class CollapseCollocatedPlans(session: SparkSession)
         t.child.outputPartitioning.numPartitions != t.outputPartitioning.numPartitions
       } else false
       if (addShuffle) {
-        t.withNewChildren(Seq(internals.newShuffleExchange(HashPartitioning(
-          t.requiredChildDistribution.head.asInstanceOf[ClusteredDistribution]
-              .clustering, t.numBuckets), t.child)))
+        t.withNewChildren(internals.newShuffleExchange(internals.newClusteredPartitioning(
+          t.requiredChildDistribution.head, t.numBuckets), t.child) :: Nil)
       } else t
   }
 }

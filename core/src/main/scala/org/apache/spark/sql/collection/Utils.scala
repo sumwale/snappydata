@@ -33,7 +33,6 @@ import scala.util.control.NonFatal
 import com.esotericsoftware.kryo.io.{Input, Output}
 import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 import com.gemstone.gemfire.internal.cache.PartitionedRegion
-import com.gemstone.gemfire.internal.shared.unsafe.UnsafeHolder
 import com.pivotal.gemfirexd.Attribute.{PASSWORD_ATTR, USERNAME_ATTR}
 import com.pivotal.gemfirexd.internal.engine.Misc
 import com.pivotal.gemfirexd.internal.engine.jdbc.GemFireXDRuntimeException
@@ -344,7 +343,7 @@ object Utils extends Logging with SparkSupport {
   def getPartitionData(blockId: BlockId, bm: BlockManager): ByteBuffer = {
     bm.getLocalBytes(blockId) match {
       case Some(block) => try {
-        block.toByteBuffer
+        block.toByteBuffer()
       } finally {
         bm.releaseLock(blockId)
       }
@@ -758,12 +757,6 @@ object Utils extends Logging with SparkSupport {
     val m = SQLExecution.getClass.getDeclaredMethod("nextExecutionId")
     m.setAccessible(true)
     m
-  }
-
-  private[sql] val rddPartitionsOffset: Long = {
-    val f = classOf[RDD[_]].getDeclaredField("org$apache$spark$rdd$RDD$$partitions_")
-    f.setAccessible(true)
-    UnsafeHolder.getUnsafe.objectFieldOffset(f)
   }
 
   def getJsonGenerator(dataType: DataType, columnName: String,

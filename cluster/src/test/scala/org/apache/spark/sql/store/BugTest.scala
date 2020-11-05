@@ -23,8 +23,8 @@ import scala.collection.mutable.ArrayBuffer
 import scala.io.Source
 
 import com.pivotal.gemfirexd.TestUtil
-import io.snappydata.SnappyFunSuite.resultSetToDataset
-import io.snappydata.{Property, SnappyFunSuite}
+import io.snappydata.SnappyFunSuite.{resultSetToDataset, waitForCriterion}
+import io.snappydata.{Property, SnappyFunSuite, SnappyTableStatsProviderService}
 import org.junit.Assert._
 import org.scalatest.BeforeAndAfterAll
 
@@ -32,9 +32,11 @@ import org.apache.spark.JobExecutionStatus
 import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd}
 import org.apache.spark.sql.catalog.Column
 import org.apache.spark.sql.collection.Utils
+import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.ui.SQLExecutionUIData
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
-import org.apache.spark.sql.{Row, SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SnappySession, SparkSession}
 
 class BugTest extends SnappyFunSuite with BeforeAndAfterAll {
 
@@ -387,7 +389,7 @@ class BugTest extends SnappyFunSuite with BeforeAndAfterAll {
     // meta-data lookup should not fail now
     cstmt.execute()
     assert(cstmt.getString(3).contains(
-      "CASE WHEN (yeari > 0) THEN CAST(1 AS DECIMAL(11,1)) ELSE CAST(1.1 AS DECIMAL(11,1)) END"))
+      "CASE WHEN (yeari > 0) THEN CAST(1 AS DECIMAL(11,1)) ELSE CAST(1.1BD AS DECIMAL(11,1)) END"))
 
     // query on view
     session.sql(s"select count(*) from $viewname").collect()
@@ -1161,35 +1163,125 @@ class BugTest extends SnappyFunSuite with BeforeAndAfterAll {
     // scalastyle:on println
   }
 
+  private def checkUIPlan(session: SnappySession, expectedNumJobs: Int,
+      maxDurationMillis: Long, numRows: Int): Unit = waitForCriterion({
+    val sqlStore = session.sharedState.statusStore
+    // last one should be the requested query
+    val queryUIData: SQLExecutionUIData = sqlStore.executionsList().last
+    queryUIData.completionTime match {
+      case None => false
+      case Some(c) =>
+        val duration = c.getTime - queryUIData.submissionTime
+        // never expect the query above to take more than 5 secs
+        assert(duration > 0L)
+        assert(duration < maxDurationMillis)
+        assert(queryUIData.jobs.count(_._2 == JobExecutionStatus.SUCCEEDED) === expectedNumJobs)
+
+        val execId = queryUIData.executionId
+        val metrics = sqlStore.executionMetrics(execId)
+        val scanNode = sqlStore.planGraph(execId).allNodes.find(_.name == "ColumnTableScan").get
+        val numRowsMetric = scanNode.metrics.find(_.name == "number of output rows").get
+        assert(metrics(numRowsMetric.accumulatorId) ===
+            SQLMetrics.stringValue(numRowsMetric.metricType, numRows :: Nil))
+        true
+    }
+  }, "waiting for query execution to finish")
+
   test("SNAP-3123: check for GUI plans and SNAP-3141: code gen failure") {
     val session = snc.snappySession.newSession()
     session.sql(s"set ${Property.UseOptimzedHashAggregate.name} = true")
     session.sql(s"set ${Property.UseOptimizedHashAggregateForSingleKey.name} = true")
 
     val numRows = 1000000
-    val sleepTime = 5000L
+    val maxDurationMillis = 5000L
     session.sql("create table test1 (id long, data string) using column " +
         s"options (buckets '8') as select id, 'data_' || id from range($numRows)")
-    val ds = session.sql(
+    var ds = session.sql(
       "select avg(id) average, id % 10 from test1 group by id % 10 order by average")
-    Thread.sleep(sleepTime)
     ds.collect()
-
     // check UI timings and plan details
-    val sqlStore = session.sharedState.statusStore
-    // last one should be the query above
-    val queryUIData = sqlStore.executionsList().last
-    val duration = queryUIData.completionTime.get.getTime - queryUIData.submissionTime
-    // never expect the query above to take more than 5 secs
-    assert(duration > 0L)
-    assert(duration < sleepTime)
-    assert(queryUIData.jobs.count(_._2 == JobExecutionStatus.SUCCEEDED) === 2)
+    checkUIPlan(session, expectedNumJobs = 2, maxDurationMillis, numRows)
 
-    val executionId = queryUIData.executionId
-    val metrics = sqlStore.executionMetrics(executionId)
-    val scanNode = sqlStore.planGraph(executionId).allNodes.find(_.name == "ColumnTableScan").get
-    val numRowsMetric = scanNode.metrics.find(_.name == "number of output rows").get
-    assert(metrics(numRowsMetric.accumulatorId) ===
-        SQLMetrics.stringValue(numRowsMetric.metricType, numRows :: Nil))
+    ds = session.sql(
+      "select avg(id) average, id % 10 from test1 group by id % 10")
+    ds.collect()
+    // check UI timings and plan details
+    checkUIPlan(session, expectedNumJobs = 1, maxDurationMillis, numRows)
+
+    ds = session.sql(
+      "select avg(id) average, id % 20 from test1 group by id % 20")
+    ds.collect()
+    // check UI timings and plan details
+    checkUIPlan(session, expectedNumJobs = 1, maxDurationMillis, numRows)
+
+    ds = session.sql(
+      "select avg(id) average, id % 20 from test1 group by id % 20 order by average")
+    ds.collect()
+    // check UI timings and plan details
+    checkUIPlan(session, expectedNumJobs = 2, maxDurationMillis, numRows)
+  }
+
+  private def checkInMemoryScan(df: DataFrame, assertion: Boolean): Unit = {
+    assert(df.queryExecution.executedPlan.find(
+      _.isInstanceOf[InMemoryTableScanExec]).isDefined === assertion)
+  }
+
+  private def cacheChecks(session: SparkSession, planCaching: Boolean): Unit = {
+    val planCache = SnappySession.getPlanCache.asMap()
+
+    def withPlanCaching(size: Int): Int = if (planCaching) size else 0
+
+    var df = session.sql("select * from cacheTest1")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 1))
+    assert(df.collect().length === 1000)
+    df = session.sql("select * from cacheTest1 where id > 10")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 2))
+    assert(df.collect().length === 989)
+    df = session.sql("select * from cacheTest1 where id > 20")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 2))
+    assert(df.collect().length === 979)
+
+    df = session.sql("select * from cacheTest1 where id > 10").cache()
+    checkInMemoryScan(df, assertion = true)
+    // .cache() call will clear all cached plans
+    assert(planCache.size() === 0)
+    assert(df.collect().length === 989)
+    df = session.sql("select * from cacheTest1")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 1))
+    assert(df.collect().length === 1000)
+    df = session.sql("select * from cacheTest1 where id > 20")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 2))
+    assert(df.collect().length === 979)
+    df = session.sql("select * from cacheTest1 where id > 10")
+    checkInMemoryScan(df, assertion = true)
+    assert(planCache.size() === withPlanCaching(size = 2))
+    assert(df.collect().length === 989)
+    df = session.sql("select * from cacheTest1 where id > 15")
+    checkInMemoryScan(df, assertion = false)
+    assert(planCache.size() === withPlanCaching(size = 2))
+    assert(df.collect().length === 984)
+  }
+
+  test("Dataset.cache() with and without planCaching") {
+    val session = snc.snappySession
+    session.sql("create table cacheTest1 using column as select * from range(1000)")
+
+    SnappyTableStatsProviderService.TEST_SUSPEND_CACHE_INVALIDATION = true
+    try {
+      Property.PlanCaching.set(session.sessionState.conf, true)
+      cacheChecks(session, planCaching = true)
+      Property.PlanCaching.set(session.sessionState.conf, false)
+      cacheChecks(session, planCaching = false)
+      Property.PlanCaching.set(session.sessionState.conf, true)
+    } finally {
+      SnappyTableStatsProviderService.TEST_SUSPEND_CACHE_INVALIDATION = false
+
+      session.sql("drop table cacheTest1")
+    }
   }
 }

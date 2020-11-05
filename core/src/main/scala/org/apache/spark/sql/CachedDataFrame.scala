@@ -18,6 +18,7 @@ package org.apache.spark.sql
 
 import java.nio.ByteBuffer
 import java.sql.SQLException
+import java.util.concurrent.atomic.{AtomicReference => AR}
 
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
@@ -32,7 +33,7 @@ import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 import com.gemstone.gemfire.SystemFailure
 import com.gemstone.gemfire.cache.LowMemoryException
 import com.gemstone.gemfire.internal.shared.ClientSharedUtils
-import com.gemstone.gemfire.internal.shared.unsafe.DirectBufferAllocator
+import com.gemstone.gemfire.internal.shared.unsafe.{DirectBufferAllocator, UnsafeHolder}
 import com.gemstone.gemfire.internal.{ByteArrayDataInput, ByteBufferDataOutput}
 import com.pivotal.gemfirexd.internal.shared.common.reference.SQLState
 import io.snappydata.{Constant, Property}
@@ -43,7 +44,6 @@ import org.apache.spark.memory.DefaultMemoryConsumer
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
-import org.apache.spark.sql.catalyst.expressions.codegen.CodeAndComment
 import org.apache.spark.sql.catalyst.expressions.{ParamLiteral, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution._
@@ -55,32 +55,39 @@ import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.CallSite
 
 class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecution,
-    private[sql] val queryExecutionString: String,
-    @transient private[sql] val queryPlanInfo: SparkPlanInfo,
-    private[sql] var currentQueryExecutionString: String,
-    @transient private[sql] var currentQueryPlanInfo: SparkPlanInfo,
-    private var cachedRDD: RDD[InternalRow], shuffleDependencies: Array[Int], encoder: Encoder[Row],
-    shuffleCleanups: Array[Future[Unit]], val rddId: Int, noSideEffects: Boolean,
-    val queryHints: java.util.Map[String, String], private[sql] var currentExecutionId: Long,
-    private[sql] var planningTime: Long, val linkPart : Boolean = false)
-    extends Dataset[Row](snappySession, snappySession.snappySessionState.newQueryExecution(
-      _queryExecution.logical), encoder) {
+    private var _queryExecutionString: String, private var currentQueryExecutionString: String,
+    @transient private var queryPlanInfo: SparkPlanInfo,
+    @transient private var currentQueryPlanInfo: SparkPlanInfo,
+    private var cachedRDD: RDD[InternalRow], shuffleDependencies: Array[Int],
+    encoder: Encoder[Row], paramLiteralWrapper: ParamLiteralWrapper, paramsId: Int,
+    queryShortString: String, val queryString: String, shuffleCleanups: Array[Future[Unit]],
+    val rddId: Int, noSideEffects: Boolean, queryHints: Map[String, String],
+    private var currentExecutionId: Long, private var planningTime: Long,
+    linkPart: Boolean, _boundEnc: AR[ExpressionEncoder[Row]] = new AR[ExpressionEncoder[Row]],
+    @transient private var _rowConverter: UnsafeProjection = null)
+    extends Dataset[Row](snappySession, _queryExecution, encoder) {
+
+  private var currentLiterals: Array[ParamLiteral] = _
+
+  @transient private var prepared: Boolean = _
+
+  private final def paramLiterals: Array[ParamLiteral] = paramLiteralWrapper.literals
+
+  private[sql] final def queryExecutionString: String = _queryExecutionString
 
   private[sql] final def isCached: Boolean = cachedRDD ne null
 
   private def getExecRDD: RDD[InternalRow] =
     if (isCached) cachedRDD else queryExecution.executedPlan.execute()
 
-  @transient
-  private var _boundEnc: ExpressionEncoder[Row] = _
-
-  // not using lazy val so that duplicate() can copy over existing value, if any
+  // not using lazy val so that withCurrentLiterals() can copy over existing value, if any
   private def boundEnc: ExpressionEncoder[Row] = {
-    if (_boundEnc ne null) _boundEnc
+    val enc = _boundEnc.get()
+    if (enc ne null) enc
     else {
-      _boundEnc = exprEnc.resolveAndBind(logicalPlan.output,
-        snappySession.snappySessionState.analyzer)
-      _boundEnc
+      _boundEnc.compareAndSet(null, exprEnc.resolveAndBind(logicalPlan.output,
+        snappySession.snappySessionState.analyzer))
+      _boundEnc.get()
     }
   }
 
@@ -89,10 +96,7 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
     isCached && shuffleDependencies.length == 0 && cachedRDD.getNumPartitions <= 2
   }
 
-  @transient
-  private var _rowConverter: UnsafeProjection = _
-
-  // not using lazy val so that duplicate() can copy over existing value, if any
+  // not using lazy val so that withCurrentLiterals() can copy over existing value, if any
   private def rowConverter: UnsafeProjection = {
     if (_rowConverter ne null) _rowConverter
     else {
@@ -100,21 +104,6 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
       _rowConverter
     }
   }
-
-  private[sql] var paramLiterals: Array[ParamLiteral] = _
-  private[sql] var paramsId: Int = _
-
-  @transient
-  private[sql] var currentLiterals: Array[ParamLiteral] = _
-
-  @transient
-  private[sql] var queryShortString: String = _
-
-  @transient
-  private[sql] var queryString: String = _
-
-  @transient
-  private var prepared: Boolean = _
 
   private[sql] def startShuffleCleanups(sc: SparkContext): Unit = {
     val numShuffleDeps = shuffleDependencies.length
@@ -150,26 +139,95 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
     }
   }
 
-  private[sql] def duplicate(): CachedDataFrame = {
+  private def sameLiterals(currentLiterals: Array[ParamLiteral]): Boolean = {
+    if ((currentLiterals ne null) && currentLiterals.length > 0 &&
+        (paramLiterals ne currentLiterals)) {
+      for (pos <- paramLiterals.indices) {
+        if (paramLiterals(pos).value != currentLiterals(pos).value) {
+          return false
+        }
+      }
+    }
+    true
+  }
+
+  private def initCurrentQueryPlanInfo(currentLiterals: Array[ParamLiteral]): Unit = {
+    if (queryPlanInfo eq null) {
+      currentQueryPlanInfo = PartitionedPhysicalScan.getSparkPlanInfo(
+        queryExecution.executedPlan, currentLiterals, paramsId)
+    } else {
+      currentQueryPlanInfo = PartitionedPhysicalScan.updatePlanInfo(
+        queryPlanInfo, currentLiterals, paramsId)
+    }
+  }
+
+  private def updateCurrentExecutionData(currentLiterals: Array[ParamLiteral]): Unit = {
+    currentQueryExecutionString = SnappySession.replaceParamLiterals(
+      queryExecutionString, currentLiterals, paramsId)
+    initCurrentQueryPlanInfo(currentLiterals)
+  }
+
+  /**
+   * Make a copy of currentLiterals in parent paramLiterals since we need to retain an original
+   * copy as this one will update the shared copy of paramLiterals in applyCurrentLiterals().
+   */
+  private def copyParamLiteralsToCurrent(): Unit = {
+    if ((this.currentLiterals eq null) && paramLiterals.length > 0) {
+      val newLiterals = new Array[ParamLiteral](paramLiterals.length)
+      for (index <- paramLiterals.indices) {
+        newLiterals(index) = paramLiterals(index).copy()
+      }
+      this.currentLiterals = newLiterals
+    }
+  }
+
+  private[sql] def withCurrentLiterals(currentLiterals: Array[ParamLiteral],
+      sqlShortText: String, sqlText: String): CachedDataFrame = {
+    val cacheManager = snappySession.sharedState.cacheManager
+    // skip sameLiterals check if we don't need the result
+    val changedLiterals =
+      if (paramLiteralWrapper.changed && cacheManager.isEmpty) false
+      else !sameLiterals(currentLiterals)
+    // check for Spark cache
+    if (changedLiterals && !cacheManager.isEmpty) {
+      copyParamLiteralsToCurrent()
+      applyCurrentLiterals(currentLiterals)
+      if (cacheManager.lookupCachedData(this).isDefined) {
+        val newExecution =
+          snappySession.snappySessionState.newQueryExecution(queryExecution.logical)
+        val executionStr = SnappySession.replaceParamLiterals(newExecution.toString,
+          currentLiterals, paramsId)
+        val planInfo = PartitionedPhysicalScan.getSparkPlanInfo(
+          newExecution.executedPlan, currentLiterals, paramsId)
+        return new CachedDataFrame(snappySession, newExecution, executionStr, executionStr,
+          planInfo, planInfo, cachedRDD = null, Array.emptyIntArray, encoder,
+          CachedDataFrame.wrap(currentLiterals), paramsId, sqlShortText, sqlText,
+          SnappySession.EMPTY_SHUFFLE_CLEANUPS, rddId, noSideEffects, queryHints,
+          currentExecutionId = -1L, planningTime = 0L, linkPart, _boundEnc, _rowConverter)
+      }
+    }
     val cdf = new CachedDataFrame(snappySession, queryExecution, queryExecutionString,
-      queryPlanInfo, currentQueryExecutionString = null, currentQueryPlanInfo = null, cachedRDD,
-      shuffleDependencies, encoder, shuffleCleanups, rddId, noSideEffects, queryHints,
-      currentExecutionId = -1L, planningTime = -1L, linkPart)
-    cdf._boundEnc = boundEnc // force materialize boundEnc which is commonly used
-    cdf._rowConverter = _rowConverter
-    cdf.paramLiterals = paramLiterals
-    cdf.paramsId = paramsId
+      currentQueryExecutionString, queryPlanInfo, currentQueryPlanInfo, cachedRDD,
+      shuffleDependencies, encoder, paramLiteralWrapper, paramsId, sqlShortText, sqlText,
+      shuffleCleanups, rddId, noSideEffects, queryHints, currentExecutionId = -1L,
+      planningTime = 0L, linkPart, _boundEnc, _rowConverter)
+    if (changedLiterals || paramLiteralWrapper.changed) {
+      copyParamLiteralsToCurrent()
+      cdf.updateCurrentExecutionData(currentLiterals)
+    }
+    cdf.currentLiterals = currentLiterals
     cdf
   }
 
   private def reset(): Unit = clearPartitions(cachedRDD :: Nil)
 
-  private def applyCurrentLiterals(): Unit = {
-    if (paramLiterals.length > 0 && (paramLiterals ne currentLiterals) &&
-        (currentLiterals ne null)) {
+  private def applyCurrentLiterals(currentLiterals: Array[ParamLiteral]): Unit = {
+    if ((currentLiterals ne null) && paramLiterals.length > 0) {
+      assert(paramLiterals ne currentLiterals)
       for (pos <- paramLiterals.indices) {
         paramLiterals(pos).value = currentLiterals(pos).value
       }
+      paramLiteralWrapper.changed = true
     }
   }
 
@@ -187,7 +245,7 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
       case null => Nil
       case r =>
         // f.set(r, null)
-        Platform.putObjectVolatile(r, Utils.rddPartitionsOffset, null)
+        Platform.putObjectVolatile(r, CachedDataFrame.rddPartitionsOffset, null)
         getChildren(r)
     }
     if (children.nonEmpty) clearPartitions(children)
@@ -222,27 +280,16 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
     if (prepared) return false
     if (isCached) {
       reset()
-      applyCurrentLiterals()
+      applyCurrentLiterals(currentLiterals)
     }
+    if (currentQueryPlanInfo eq null) initCurrentQueryPlanInfo(paramLiterals)
     // Reset the linkPartitionToBuckets flag before determining RDD partitions.
     snappySession.linkPartitionsToBuckets(flag = linkPart)
     // Forcibly re-evaluate the partitions.
     reEvaluatePartitions(cachedRDD :: Nil)
     setPoolForExecution()
-    // update the strings in query execution and planInfo
-    if (currentQueryExecutionString eq null) {
-      currentQueryExecutionString = SnappySession.replaceParamLiterals(
-        queryExecutionString, currentLiterals, paramsId)
-      val planInfo = if (queryPlanInfo ne null) queryPlanInfo
-      else PartitionedPhysicalScan.getSparkPlanInfo(queryExecution.executedPlan)
-      currentQueryPlanInfo = PartitionedPhysicalScan.updatePlanInfo(
-        planInfo, currentLiterals, paramsId)
-    }
     // set the query hints as would be set at the end of un-cached sql()
-    snappySession.synchronized {
-      snappySession.queryHints.clear()
-      snappySession.queryHints.putAll(queryHints)
-    }
+    snappySession.addQueryHints(queryHints, replace = true)
     queryExecution.executedPlan.foreach(_.resetMetrics())
     waitForPendingShuffleCleanups()
     prepared = true
@@ -335,8 +382,7 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
       processPartition: (TaskContext, Iterator[InternalRow]) => (U, Int),
       resultHandler: (Int, U) => R,
       decodeResult: R => Iterator[InternalRow],
-      skipUnpartitionedDataProcessing: Boolean = false,
-      skipLocalCollectProcessing: Boolean = false): Iterator[R] = {
+      skipUnpartitionedDataProcessing: Boolean = false): Iterator[R] = {
     val sc = snappySession.sparkContext
     val hasLocalCallSite = sc.getLocalProperties.containsKey(CallSite.LONG_FORM)
     if (!hasLocalCallSite) {
@@ -360,15 +406,8 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
           CachedDataFrame.executeTake(takeRDD, plan.limit, processPartition,
             resultHandler, decodeResult, snappySession)
 
-        case plan: CollectAggregateExec =>
-          if (skipLocalCollectProcessing) {
-            // special case where caller will do processing of the blocks
-            // (returns a AggregatePartialDataIterator)
-            // TODO: handle fallback for this case
-            new AggregatePartialDataIterator(plan.generatedSource,
-              plan.generatedReferences, plan.child.schema.length,
-              plan.executeCollectData()).asInstanceOf[Iterator[R]]
-          } else if (skipUnpartitionedDataProcessing) {
+        case _: CollectAggregateExec =>
+          if (skipUnpartitionedDataProcessing) {
             // no processing required
             executeCollect().iterator.asInstanceOf[Iterator[R]]
           } else {
@@ -437,36 +476,30 @@ class CachedDataFrame(snappySession: SnappySession, _queryExecution: QueryExecut
     results.iterator
   }
 
-  override def persist(): this.type = {
-    super.persist()
-    // remove cached RDD
+  /** reset QueryExecution, SparkPlanInfo and remove cached RDD */
+  private def resetPlan(): Unit = {
+    val newExecution = snappySession.snappySessionState.newQueryExecution(queryExecution.logical)
+    Platform.putObjectVolatile(this, CachedDataFrame.queryExecutionFieldOffset, newExecution)
+    _queryExecutionString = SnappySession.replaceParamLiterals(
+      queryExecution.toString, paramLiterals, paramsId)
+    currentQueryExecutionString = _queryExecutionString
+    queryPlanInfo = null
+    currentQueryPlanInfo = null
     cachedRDD = null
+  }
+
+  override def persist(): this.type = {
+    if (isCached) applyCurrentLiterals(currentLiterals)
+    super.persist()
+    resetPlan()
     this
   }
 
   override def persist(newLevel: StorageLevel): this.type = {
+    if (isCached) applyCurrentLiterals(currentLiterals)
     super.persist(newLevel)
-    // remove cached RDD
-    cachedRDD = null
+    resetPlan()
     this
-  }
-}
-
-final class AggregatePartialDataIterator(
-    val generatedSource: CodeAndComment,
-    val generatedReferences: Array[Any], val numFields: Int,
-    val partialAggregateResult: Array[Any]) extends Iterator[Any] {
-
-  private val numResults = partialAggregateResult.length
-
-  private var index = 0
-
-  override def hasNext: Boolean = index < numResults
-
-  override def next(): Any = {
-    val data = partialAggregateResult(index)
-    index += 1
-    data
   }
 }
 
@@ -476,6 +509,18 @@ object CachedDataFrame
 
   @transient @volatile var sparkConf: SparkConf = _
   @transient @volatile var compressionCodec: String = _
+
+  private val rddPartitionsOffset: Long = {
+    val f = classOf[RDD[_]].getDeclaredField("org$apache$spark$rdd$RDD$$partitions_")
+    f.setAccessible(true)
+    UnsafeHolder.getUnsafe.objectFieldOffset(f)
+  }
+
+  private val queryExecutionFieldOffset: Long = {
+    val f = classOf[Dataset[_]].getDeclaredField("queryExecution")
+    f.setAccessible(true)
+    UnsafeHolder.getUnsafe.objectFieldOffset(f)
+  }
 
   override def write(kryo: Kryo, output: Output): Unit = {}
 
@@ -892,6 +937,9 @@ object CachedDataFrame
     res.get
   }
 
+  private[sql] def wrap(paramLiterals: Array[ParamLiteral]): ParamLiteralWrapper =
+    new ParamLiteralWrapper(paramLiterals)
+
   private[sql] def clear(): Unit = synchronized {
     sparkConf = null
     compressionCodec = null
@@ -909,3 +957,12 @@ object CachedDataFrame
  */
 class PartitionResult(_data: Array[Byte], _numRows: Int)
     extends Tuple2[Array[Byte], Int](_data, _numRows) with Serializable
+
+/**
+ * A simple wrapper around an array of ParamLiterals to enable sharing it among various copies
+ * of a CachedDataFrame (created by its withCurrentLiterals method) and having a flag to indicate
+ * if the wrapped array of literals have been modified by CachedDataFrame.applyCurrentLiterals.
+ */
+private class ParamLiteralWrapper(val literals: Array[ParamLiteral]) extends Serializable {
+  private[sql] var changed: Boolean = false
+}

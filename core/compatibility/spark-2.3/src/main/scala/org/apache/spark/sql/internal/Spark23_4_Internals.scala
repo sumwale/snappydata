@@ -20,7 +20,6 @@ import java.lang.reflect.{Field, Method}
 
 import scala.collection.mutable
 
-import com.gemstone.gemfire.internal.shared.unsafe.UnsafeHolder
 import io.snappydata.sql.catalog.SnappyExternalCatalog
 import io.snappydata.{HintName, Property, QueryHint}
 
@@ -60,7 +59,6 @@ import org.apache.spark.status.api.v1.RDDStorageInfo
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.SnappyStreamingContext
 import org.apache.spark.streaming.dstream.DStream
-import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.Clock
 
 /**
@@ -68,16 +66,10 @@ import org.apache.spark.util.Clock
  */
 abstract class Spark23_4_Internals extends SparkInternals {
 
-  private[this] val codegenContextClassFunctions: Field = {
+  private[this] lazy val codegenContextClassFunctions: Field = {
     val f = classOf[CodegenContext].getDeclaredField("classFunctions")
     f.setAccessible(true)
     f
-  }
-
-  private[this] val listenerFieldOffset: Long = {
-    val f = classOf[SQLAppStatusStore].getDeclaredField("listener")
-    f.setAccessible(true)
-    UnsafeHolder.getUnsafe.objectFieldOffset(f)
   }
 
   override def registerFunction(sessionState: SnappySessionState, name: FunctionIdentifier,
@@ -166,22 +158,23 @@ abstract class Spark23_4_Internals extends SparkInternals {
   }
 
   override def newCaseInsensitiveMap(map: Map[String, String]): Map[String, String] = {
-    CaseInsensitiveMap[String](map)
+    if (map.isEmpty) map else CaseInsensitiveMap[String](map)
   }
 
   protected def createAndAttachSQLListener(state: SnappySharedState, sc: SparkContext): Unit = {
     // replace inside SQLAppStatusStore as well as change on the Spark ListenerBus
     state.statusStore.listener match {
       case Some(_: SnappySQLAppListener) => // already changed
-      case Some(_: SQLAppStatusListener) =>
-        val newListener = new SnappySQLAppListener(sc,
+      case _ =>
+        val newListener = new SnappySQLAppListener(sc.conf,
           sc.statusStore.store.asInstanceOf[ElementTrackingStore])
         // update on ListenerBus
         sc.listenerBus.findListenersByClass[SQLAppStatusListener]().foreach(
           sc.removeSparkListener)
         sc.listenerBus.addToStatusQueue(newListener)
-        Platform.putObjectVolatile(state.statusStore, listenerFieldOffset, newListener)
-      case _ =>
+        val listenerField = classOf[SQLAppStatusStore].getDeclaredField("listener")
+        listenerField.setAccessible(true)
+        listenerField.set(state.statusStore, Some(newListener))
     }
   }
 
@@ -307,7 +300,8 @@ abstract class Spark23_4_Internals extends SparkInternals {
 
   override def newLogicalPlanWithHints(child: LogicalPlan,
       hints: Map[String, String]): LogicalPlan = {
-    new ResolvedPlanWithHints23(child, newCaseInsensitiveMap(hints))
+    val allHints = newCaseInsensitiveMap(hints)
+    new ResolvedPlanWithHints23(child, HintInfo(JoinStrategy.hasBroadcastHint(allHints)), allHints)
   }
 
   override def newUnresolvedHint(name: String, parameters: Seq[Any],
@@ -323,7 +317,7 @@ abstract class Spark23_4_Internals extends SparkInternals {
   override def isHintPlan(plan: LogicalPlan): Boolean = plan.isInstanceOf[ResolvedHint]
 
   override def getHints(plan: LogicalPlan): Map[String, String] = plan match {
-    case p: ResolvedPlanWithHints23 => p.allHints
+    case p: ResolvedPlanWithHints23 => newCaseInsensitiveMap(p.allHints)
     case _: ResolvedHint =>
       // only broadcast supported by Spark's ResolveHint
       newCaseInsensitiveMap(Map(QueryHint.JoinType.name -> HintName.JoinType_Broadcast.names.head))
@@ -523,6 +517,11 @@ abstract class Spark23_4_Internals extends SparkInternals {
       requiredNumPartitions: Option[Int]): Distribution = {
     HashClusteredDistribution(expressions, requiredNumPartitions)
   }
+
+  override def newClusteredPartitioning(distribution: Distribution,
+      numPartitions: Int): Partitioning = {
+    distribution.createPartitioning(numPartitions)
+  }
 }
 
 /**
@@ -545,6 +544,10 @@ abstract class SnappyCacheManager23_4 extends CacheManager {
   override def recacheByPath(session: SparkSession, resourcePath: String): Unit = {
     super.recacheByPath(session, resourcePath)
     session.asInstanceOf[SnappySession].clearPlanCache()
+  }
+
+  override def lookupCachedData(plan: LogicalPlan): Option[CachedData] = {
+    if (isEmpty) None else super.lookupCachedData(plan)
   }
 }
 

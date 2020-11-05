@@ -95,6 +95,11 @@ object Constant {
 
   final val COLUMN_TABLE_INDEX_PREFIX = "snappysys_index____"
 
+  /**
+   * Internal query alias used by JdbcExecute.snappyQuery
+   */
+  final val SNAPPY_INTERNAL_QUERY_ALIAS = "__snappy_query_table"
+
   // Property to Specify whether zeppelin interpreter should be started
   // with leadnode
   val ENABLE_ZEPPELIN_INTERPRETER = "zeppelin.interpreter.enable"

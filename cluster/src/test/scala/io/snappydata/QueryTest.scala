@@ -229,7 +229,7 @@ class QueryTest extends SnappyFunSuite {
         """
           | select c1 from onerow t1
           | where exists (select 1
-          |               from   (select 1 from onerow t2 LIMIT 1)
+          |               from   (select c1 from onerow LIMIT 1) t2
           |               where  t1.c1=t2.c1)""".stripMargin),
       Row(1) :: Nil)
 

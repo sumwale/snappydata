@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Calendar, Properties}
 
 import scala.collection.JavaConverters._
+import scala.collection.immutable.SortedMap
 import scala.concurrent.Future
 import scala.language.implicitConversions
 import scala.reflect.ClassTag
@@ -35,8 +36,7 @@ import com.pivotal.gemfirexd.internal.iapi.{types => stypes}
 import com.pivotal.gemfirexd.internal.shared.common.StoredFormatIds
 import io.snappydata.sql.catalog.impl.SmartConnectorExternalCatalog
 import io.snappydata.sql.catalog.{CatalogObjectType, SnappyExternalCatalog}
-import io.snappydata.{Constant, Property, SnappyTableStatsProviderService}
-import org.eclipse.collections.impl.map.mutable.UnifiedMap
+import io.snappydata.{Constant, Property, QueryHint, SnappyTableStatsProviderService}
 
 import org.apache.spark.annotation.{DeveloperApi, Experimental}
 import org.apache.spark.jdbc.{ConnectionConf, ConnectionUtil}
@@ -92,9 +92,9 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
 
   private[spark] val id = SnappySession.newId()
 
-  private[this] val tempCacheIndex = new AtomicInteger(0)
+  @transient private lazy val tempCacheIndex = new AtomicInteger(0)
 
-  private[this] var finalizer = new FinalizeSession(this)
+  @transient private var finalizer = new FinalizeSession(this)
 
   /**
    * State shared across sessions, including the [[SparkContext]], cached data, listener,
@@ -129,6 +129,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   final def snappyParser: SnappyParser = snappySessionState.snappySqlParser.sqlParser
 
   SnappyContext.initGlobalSnappyContext(sparkContext, this)
+  SparkSession.setActiveSession(this)
 
   /**
    * A wrapped version of this session in the form of a [[SQLContext]],
@@ -143,8 +144,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
    *
    * @since 2.0.0
    */
-  @transient
-  override val sqlContext: SnappyContext = snappyContext
+  @transient override val sqlContext: SnappyContext = snappyContext
 
   /**
    * Start a new session with isolated SQL configurations, temporary tables, registered
@@ -190,11 +190,14 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   @DeveloperApi
   def sqlUncached(sqlText: String): DataFrame = {
     if (planCaching) {
+      val initialValue = Property.PlanCaching.get(sessionState.conf)
       planCaching = false
+      Property.PlanCaching.set(sessionState.conf, false)
       try {
         super.sql(sqlText)
       } finally {
-        planCaching = Property.PlanCaching.get(sessionState.conf)
+        planCaching = initialValue
+        Property.PlanCaching.set(sessionState.conf, initialValue)
       }
     } else {
       super.sql(sqlText)
@@ -213,7 +216,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
 
   private[sql] final def executePlan(plan: LogicalPlan, retryCnt: Int = 0): QueryExecution = {
     try {
-      val execution = sessionState.executePlan(plan)
+      val execution = snappySessionState.executePlan(plan)
       execution.assertAnalyzed()
       execution
     } catch {
@@ -295,18 +298,18 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   }
 
   @transient
-  private[sql] val queryHints = new ConcurrentHashMap[String, String](4, 0.7f, 1)
+  private var queryHints = SortedMap.empty[String, String]
 
   @transient
   private val contextObjects = new ConcurrentHashMap[Any, Any](16, 0.7f, 1)
 
-  @transient
-  private[sql] var currentKey: CachedKey = _
-
+  @transient private[sql] var currentKey: CachedKey = _
   @transient private[sql] var planCaching: Boolean = _
   @transient private[sql] var partitionPruning: Boolean = _
   @transient private[sql] var disableHashJoin: Boolean = _
   @transient private[sql] var enableHiveSupport: Boolean = _
+  @transient private var sqlWarnings: SQLWarning = _
+  @transient private[sql] var hiveInitializing: Boolean = _
 
   private[sql] def initStateVars(sessionState: SessionState): Unit = {
     val conf = sessionState.conf
@@ -317,11 +320,6 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     enableHiveSupport = isHiveSupportEnabled(conf.getConf(StaticSQLConf.CATALOG_IMPLEMENTATION))
   }
 
-  @transient
-  private var sqlWarnings: SQLWarning = _
-
-  private[sql] var hiveInitializing: Boolean = _
-
   private[sql] def isHiveSupportEnabled(v: String): Boolean = Utils.toLowerCase(v) match {
     case "hive" => true
     case "in-memory" => false
@@ -330,8 +328,36 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
           "Allowed values are: in-memory and hive")
   }
 
-  def getPreviousQueryHints: java.util.Map[String, String] =
-    java.util.Collections.unmodifiableMap(queryHints)
+  /**
+   * Get the query hints from last [[sql]]/[[sqlUncached]] execution as a case-insensitive map.
+   */
+  def getLastQueryHints: SortedMap[String, String] = synchronized {
+    if (queryHints.isEmpty) SortedMap.empty
+    else (SortedMap.newBuilder[String, String] ++= queryHints).result()
+  }
+
+  /**
+   * Get the index hints from last [[sql]]/[[sqlUncached]] execution as a case-insensitive map.
+   */
+  def getLastQueryIndexHints: SortedMap[String, String] = synchronized {
+    if (queryHints.isEmpty) SortedMap.empty
+    else queryHints.filterKeys(_.startsWith(QueryHint.Index.lower))
+  }
+
+  /**
+   * Get the value of query hint from last [[sql]]/[[sqlUncached]] execution.
+   */
+  def getLastQueryHint(hint: QueryHint.HintValue): Option[String] = synchronized {
+    if (queryHints.isEmpty) None else queryHints.get(hint.lower)
+  }
+
+  def addQueryHints(hints: Map[String, String], replace: Boolean): Unit = synchronized {
+    if (replace) queryHints = SortedMap.empty
+    if (hints.nonEmpty) {
+      if (replace) queryHints ++= hints
+      else queryHints ++= hints.map(p => Utils.toLowerCase(p._1) -> p._2)
+    }
+  }
 
   def getWarnings: SQLWarning = sqlWarnings
 
@@ -662,12 +688,11 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     clearPutInto()
     clearWriteLockOnTable()
     contextObjects.clear()
-    planCaching = Property.PlanCaching.get(sessionState.conf)
     sqlWarnings = null
   }
 
   private[sql] def clearQueryData(): Unit = synchronized {
-    queryHints.clear()
+    queryHints = SortedMap.empty
   }
 
   def clearPlanCache(): Unit = synchronized {
@@ -2112,6 +2137,8 @@ object SnappySession extends Logging {
   private[sql] val CACHED_PUTINTO_LOGICAL_PLAN = "cached_putinto_logical_plan"
   private[sql] val BULKWRITE_LOCK = "bulkwrite_lock"
   private[sql] val WRITE_LOCK_PREFIX = "BULKWRITE_"
+  private[sql] val EMPTY_PARAMS = Array.empty[ParamLiteral]
+  private[sql] val EMPTY_SHUFFLE_CLEANUPS = Array.empty[Future[Unit]]
 
   private val unresolvedStarRegex =
     """(cannot resolve ')(\w+).(\w+).*(' given input columns.*)""".r
@@ -2206,8 +2233,8 @@ object SnappySession extends Logging {
    * then sent with the accumulated time of both the phases.
    */
   private def planExecution(qe: QueryExecution, session: SnappySession, sql: String,
-      executedPlan: SparkPlan, paramLiterals: Array[ParamLiteral], paramsId: Int,
-      cachedPlan: Boolean)(f: => RDD[InternalRow]): (RDD[InternalRow], String, SparkPlanInfo,
+      paramLiterals: Array[ParamLiteral], paramsId: Int, cachedPlan: Boolean)
+      (f: => RDD[InternalRow]): (RDD[InternalRow], String, SparkPlanInfo,
       String, SparkPlanInfo, Long, Long) = {
     var sqlText: String = null
     val executionId = Utils.nextExecutionIdMethod.invoke(SQLExecution).asInstanceOf[Long]
@@ -2225,20 +2252,27 @@ object SnappySession extends Logging {
     try {
       // get below two with original "ParamLiteral(" tokens that will be replaced
       // by actual values before every execution
-      val queryExecutionStr = qe.toString
-      val queryPlanInfo = PartitionedPhysicalScan.getSparkPlanInfo(executedPlan)
+      var queryExecutionStr = qe.toString
       // post with proper values in event which will show up in GUI
       val postQueryExecutionStr = replaceParamLiterals(queryExecutionStr, paramLiterals, paramsId)
-      val postQueryPlanInfo = PartitionedPhysicalScan.updatePlanInfo(queryPlanInfo,
-        paramLiterals, paramsId)
+      var queryPlanInfo: SparkPlanInfo = null
+      var postQueryPlanInfo: SparkPlanInfo = null
       var rdd: RDD[InternalRow] = null
       if (cachedPlan) {
+        queryPlanInfo = PartitionedPhysicalScan.getSparkPlanInfo(qe.executedPlan)
+        postQueryPlanInfo = PartitionedPhysicalScan.updatePlanInfo(queryPlanInfo,
+          paramLiterals, paramsId)
         context.listenerBus.post(SparkListenerSQLPlanExecutionStart(
           executionId, CachedDataFrame.queryStringShortForm(sqlText),
           sqlText, postQueryExecutionStr, postQueryPlanInfo, startTime))
         rdd = f
         success = true
         endTime = System.currentTimeMillis()
+      } else {
+        queryExecutionStr = postQueryExecutionStr
+        queryPlanInfo = PartitionedPhysicalScan.getSparkPlanInfo(qe.executedPlan,
+          paramLiterals, paramsId)
+        postQueryPlanInfo = queryPlanInfo
       }
       (rdd, queryExecutionStr, queryPlanInfo, postQueryExecutionStr, postQueryPlanInfo,
           executionId, endTime - startTime)
@@ -2278,7 +2312,8 @@ object SnappySession extends Logging {
   }
 
   private def evaluatePlan(qe: QueryExecution, session: SnappySession, sqlShortText: String,
-      sqlText: String, paramLiterals: Array[ParamLiteral], paramsId: Int): CachedDataFrame = {
+      sqlText: String, paramLiterals: Array[ParamLiteral], paramsId: Int,
+      queryHints: Map[String, String]): CachedDataFrame = {
     val (executedPlan, withFallback) = getExecutedPlan(qe.executedPlan)
 
     // If this has in-memory caching then don't cache since plan can change
@@ -2290,13 +2325,14 @@ object SnappySession extends Logging {
     val cachedPlan = session.planCaching && executedPlan.find {
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec |
            _: BroadcastExchangeExec | _: InMemoryTableScanExec |
-           _: RangeExec | _: LocalTableScanExec | _: RDDScanExec => true
+           // range partitioning may change on token change hence SortExec is excluded
+           _: RangeExec | _: LocalTableScanExec | _: RDDScanExec | _: SortExec => true
       case p if HiveClientUtil.isHiveExecPlan(p) => true
       case _: DataSourceScanExec => true
       case _ => false
     }.isEmpty
 
-    val (cachedRDD, execution, origExecutionString, origPlanInfo, executionString, planInfo,
+    val (cachedRDD, execution, origExecutionString, executionString, origPlanInfo, planInfo,
     cachedRDDId, noSideEffects, executionId, planningTime: Long) = executedPlan match {
       case _ if isCommandExec(executedPlan) =>
         // TODO add caching for point updates/deletes; a bit of complication
@@ -2309,11 +2345,9 @@ object SnappySession extends Logging {
         }
         */
         // post with proper values in event which will show up in GUI
-        val origExecutionStr = qe.toString
-        val origPlanInfo = PartitionedPhysicalScan.getSparkPlanInfo(executedPlan)
-        val executionStr = replaceParamLiterals(origExecutionStr, paramLiterals, paramsId)
-        val planInfo = PartitionedPhysicalScan.updatePlanInfo(origPlanInfo,
+        val planInfo = PartitionedPhysicalScan.getSparkPlanInfo(qe.executedPlan,
           paramLiterals, paramsId)
+        val executionStr = replaceParamLiterals(qe.toString, paramLiterals, paramsId)
         // don't post separate plan for CTAS since it already has posted one for the insert
         val (eagerCollect, postGUIPlans) = executedPlan.collectFirst {
           case ExecutedCommandExec(c: CreateTableUsingCommand) if c.query.isDefined =>
@@ -2343,41 +2377,29 @@ object SnappySession extends Logging {
           if (result eq null) result = executeCollect(session, qe, execPlan)
           val newPlan = LocalRelation(execPlan.output, result)
           val execution = session.sessionState.executePlan(newPlan)
-          (null, execution, origExecutionStr, origPlanInfo, executionStr, planInfo,
+          (null, execution, executionStr, executionStr, planInfo, planInfo,
               -1, false, -1L, 0L)
         }._1
 
       case plan: CollectAggregateExec =>
         val (rdd, origExecutionStr, origPlanInfo, executionStr, planInfo, executionId, planTime) =
-          planExecution(qe, session, sqlText, plan, paramLiterals, paramsId, cachedPlan)(
+          planExecution(qe, session, sqlText, paramLiterals, paramsId, cachedPlan)(
             if (withFallback ne null) withFallback.execute(plan.child) else plan.childRDD)
-        (rdd, qe, origExecutionStr, origPlanInfo, executionStr, planInfo,
+        (rdd, qe, origExecutionStr, executionStr, origPlanInfo, planInfo,
             -1, true, executionId, planTime)
 
       case p =>
         val (rdd, origExecutionStr, origPlanInfo, executionStr, planInfo, executionId, planTime) =
-          planExecution(qe, session, sqlText, p, paramLiterals, paramsId, cachedPlan)(p match {
+          planExecution(qe, session, sqlText, paramLiterals, paramsId, cachedPlan)(p match {
             case p: CollectLimitExec =>
               if (withFallback ne null) withFallback.execute(p.child) else p.child.execute()
             case _ => qe.executedPlan.execute()
           })
-        (rdd, qe, origExecutionStr, origPlanInfo, executionStr, planInfo,
+        (rdd, qe, origExecutionStr, executionStr, origPlanInfo, planInfo,
             -1, true, executionId, planTime)
     }
 
     logDebug(s"qe.executedPlan = ${qe.executedPlan}")
-
-    // collect the query hints
-    val queryHints = session.synchronized {
-      val numHints = session.queryHints.size()
-      val hints = if (numHints == 0) java.util.Collections.emptyMap[String, String]()
-      else {
-        val m = new UnifiedMap[String, String](numHints)
-        m.putAll(session.queryHints)
-        m
-      }
-      hints
-    }
 
     val (rdd, rddId, shuffleDependencies, shuffleCleanups) = if (cachedPlan && cachedRDD != null) {
       val shuffleDeps = findShuffleDependencies(cachedRDD).toArray
@@ -2385,12 +2407,12 @@ object SnappySession extends Logging {
       (cachedRDD, cachedRDD.id, shuffleDeps, cleanups)
     } else {
       (null, if (cachedRDDId != -1) cachedRDDId else session.sparkContext.newRddId(),
-          Array.emptyIntArray, Array.empty[Future[Unit]])
+          Array.emptyIntArray, EMPTY_SHUFFLE_CLEANUPS)
     }
-    new CachedDataFrame(session, execution, origExecutionString, origPlanInfo,
-      executionString, planInfo, rdd, shuffleDependencies, RowEncoder(qe.analyzed.schema),
-      shuffleCleanups, rddId, noSideEffects, queryHints, executionId, planningTime,
-      session.hasLinkPartitionsToBuckets)
+    new CachedDataFrame(session, execution, origExecutionString, executionString, origPlanInfo,
+      planInfo, rdd, shuffleDependencies, RowEncoder(qe.analyzed.schema), CachedDataFrame.wrap(
+        paramLiterals), paramsId, sqlShortText, sqlText, shuffleCleanups, rddId, noSideEffects,
+      queryHints, executionId, planningTime, session.hasLinkPartitionsToBuckets)
   }
 
   private[this] lazy val planCache = {
@@ -2411,17 +2433,17 @@ object SnappySession extends Logging {
     val planCaching = session.planCaching
     val paramLiterals = parser.sqlParser.getAllLiterals
     val paramsId = parser.sqlParser.getCurrentParamsId
+    val queryHints = session.getLastQueryHints
     val key = CachedKey(session, session.getCurrentSchema,
-      plan, sqlText, paramLiterals, planCaching)
+      plan, sqlText, paramLiterals, paramsId, planCaching, queryHints.hashCode())
     var cachedDF: CachedDataFrame = if (planCaching) planCache.getIfPresent(key) else null
     if (cachedDF eq null) {
       // evaluate the plan and cache it if required
-      key.currentLiterals = paramLiterals
-      key.currentParamsId = paramsId
       session.currentKey = key
       try {
         val execution = session.executePlan(plan)
-        cachedDF = evaluatePlan(execution, session, sqlShortText, sqlText, paramLiterals, paramsId)
+        cachedDF = evaluatePlan(execution, session, sqlShortText, sqlText,
+          paramLiterals, paramsId, queryHints)
         // put in cache if the DF has to be cached
         if (planCaching && cachedDF.isCached) {
           if (isTraceEnabled) {
@@ -2429,8 +2451,6 @@ object SnappySession extends Logging {
           } else if (isDebugEnabled) {
             logDebug(s"Caching the plan for: $sqlText")
           }
-          key.currentLiterals = null
-          key.currentParamsId = -1
           planCache.put(key, cachedDF)
         }
       } finally {
@@ -2438,22 +2458,8 @@ object SnappySession extends Logging {
       }
     } else {
       logDebug(s"Using cached plan for: $sqlText (existing: ${cachedDF.queryString})")
-      cachedDF = cachedDF.duplicate()
+      cachedDF = cachedDF.withCurrentLiterals(paramLiterals, sqlShortText, sqlText)
     }
-    handleCachedDataFrame(cachedDF, sqlShortText, sqlText, paramLiterals, paramsId)
-  }
-
-  private def handleCachedDataFrame(cachedDF: CachedDataFrame, sqlShortText: String,
-      sqlText: String, paramLiterals: Array[ParamLiteral], paramsId: Int): CachedDataFrame = {
-    cachedDF.queryShortString = sqlShortText
-    cachedDF.queryString = sqlText
-    if (cachedDF.isCached && (cachedDF.paramLiterals eq null)) {
-      cachedDF.paramLiterals = paramLiterals
-      cachedDF.paramsId = paramsId
-    }
-    // store the current tokenized constant values which will be replaced
-    // before execution in CachedDataFrame
-    cachedDF.currentLiterals = paramLiterals
     cachedDF
   }
 
@@ -2481,7 +2487,7 @@ object SnappySession extends Logging {
         val lenEnd = text.indexOf(',', idEnd + 1)
         val len = Integer.parseInt(text.substring(idEnd + 1, lenEnd))
         lastIndex = lenEnd + 1 + len
-        // append the new value if matching ID else replace with embedded value
+        // append the new value if matching ID else use the value embedded in `text`
         if (paramsId == id) {
           sb.append(currentParamConstants(pos).valueString)
           // skip to end of value and continue searching
@@ -2504,17 +2510,14 @@ object SnappySession extends Logging {
     else ID.incrementAndGet()
   }
 
-  private[spark] def clearSessionCache(sessionId: Long): SnappySession = {
-    var foundSession: SnappySession = null
+  private[spark] def clearSessionCache(sessionId: Long): Unit = {
     val iter = planCache.asMap().keySet().iterator()
     while (iter.hasNext) {
       val session = iter.next().session
       if (session.id == sessionId) {
-        foundSession = session
         iter.remove()
       }
     }
-    foundSession
   }
 
   def clearAllCache(onlyQueryPlanCache: Boolean = false): Unit = {
@@ -2603,31 +2606,31 @@ object SnappySession extends Logging {
 
 final class CachedKey(val session: SnappySession,
     val currSchema: String, private val lp: LogicalPlan,
-    val sqlText: String, val hintHashcode: Int) {
-
-  private[sql] var currentLiterals: Array[ParamLiteral] = _
-  private[sql] var currentParamsId: Int = -1
+    val sqlText: String, val hintHashCode: Int,
+    val paramLiterals: Array[ParamLiteral], val paramsId: Int) {
 
   override val hashCode: Int = {
     var h = ClientResolverUtils.addIntToHashOpt(session.hashCode(), 42)
     h = ClientResolverUtils.addIntToHashOpt(currSchema.hashCode, h)
     h = ClientResolverUtils.addIntToHashOpt(lp.hashCode(), h)
-    ClientResolverUtils.addIntToHashOpt(hintHashcode, h)
+    ClientResolverUtils.addIntToHashOpt(hintHashCode, h)
   }
 
   override def equals(obj: Any): Boolean = {
     obj match {
       case x: CachedKey =>
-        x.hintHashcode == hintHashcode && (x.session eq session) &&
-            (x.currSchema == currSchema) && x.lp == lp
+        (x eq this) || (x.hintHashCode == hintHashCode && x.hashCode == hashCode &&
+            (x.session eq session) && x.currSchema == currSchema && x.lp.fastEquals(lp))
       case _ => false
     }
   }
 }
 
 object CachedKey extends SparkSupport {
+
   def apply(session: SnappySession, currschema: String, plan: LogicalPlan, sqlText: String,
-      paramLiterals: Array[ParamLiteral], forCaching: Boolean): CachedKey = {
+      paramLiterals: Array[ParamLiteral], paramsId: Int, forCaching: Boolean,
+      hintHashCode: Int): CachedKey = {
 
     def normalizeExprIds: PartialFunction[Expression, Expression] = {
       case a: AttributeReference =>
@@ -2644,9 +2647,11 @@ object CachedKey extends SparkSupport {
             .transformAllExpressions(normalizeExprIds), ExprId(-1))
       case l: ListQuery =>
         l.copy(plan = l.plan.transformAllExpressions(normalizeExprIds), exprId = ExprId(-1))
+        // create a tokenized ParamLiteral to compare by position for caching
+      case pl: ParamLiteral if !pl.isTokenized => pl.copy(tokenized = true)
     }
 
-    def transformExprID: PartialFunction[LogicalPlan, LogicalPlan] = {
+    def transformExprIDs: PartialFunction[LogicalPlan, LogicalPlan] = {
       case f@Filter(condition, child) => f.copy(
         condition = condition.transform(normalizeExprIds),
         child = child.transformAllExpressions(normalizeExprIds))
@@ -2654,13 +2659,9 @@ object CachedKey extends SparkSupport {
     }
 
     // normalize lp so that two queries can be determined to be equal
-    val normalizedPlan = if (forCaching) {
-      // mark ParamLiterals as "tokenized" at this point so that comparison
-      // in the plan is based on position rather than value
-      for (l <- paramLiterals) l.tokenized = true
-      plan.transform(transformExprID)
-    } else plan
-    new CachedKey(session, currschema, normalizedPlan, sqlText, session.queryHints.hashCode())
+    val normalizedPlan = if (forCaching) plan.transform(transformExprIDs) else plan
+    new CachedKey(session, currschema, normalizedPlan, sqlText, hintHashCode,
+      paramLiterals, paramsId)
   }
 }
 

@@ -17,11 +17,11 @@
 
 package org.apache.spark.sql.sources
 
-import scala.collection.JavaConverters._
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import io.snappydata.QueryHint._
+import io.snappydata.QueryHint
 
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, PredicateHelper}
 import org.apache.spark.sql.catalyst.optimizer.ReorderJoin
@@ -47,6 +47,12 @@ case class ResolveQueryHints(snappySession: SnappySession)
 
   private def analyzer = snappySession.sessionState.analyzer
 
+  @tailrec
+  private def unwrapLogicalRelation(plan: LogicalPlan): Option[LogicalRelation] = plan match {
+    case lr: LogicalRelation => Some(lr)
+    case s: SubqueryAlias => unwrapLogicalRelation(s.child)
+  }
+
   override def apply(plan: LogicalPlan): LogicalPlan = {
 
     val explicitIndexHint = getIndexHints
@@ -59,12 +65,14 @@ case class ResolveQueryHints(snappySession: SnappySession)
       case lr: LogicalRelation if lr.relation.isInstanceOf[ColumnFormatRelation] =>
         explicitIndexHint.getOrElse(lr.relation.asInstanceOf[ColumnFormatRelation].table,
           Some(lr)).get
-      case s: SubqueryAlias if s.child.isInstanceOf[LogicalRelation] &&
-          !s.child.asInstanceOf[LogicalRelation].relation.isInstanceOf[IndexColumnFormatRelation] =>
-        explicitIndexHint.get(s.alias) match {
-          case Some(Some(index)) => internals.newSubqueryAlias(s.alias, index)
-          case _ => s
-        }
+      case s: SubqueryAlias => unwrapLogicalRelation(s) match {
+        case Some(lr) if !lr.relation.isInstanceOf[IndexColumnFormatRelation] =>
+          explicitIndexHint.get(s.alias) match {
+            case Some(Some(index)) => internals.newSubqueryAlias(s.alias, index)
+            case _ => s
+          }
+        case _ => s
+      }
     }
     internals.logicalPlanResolveUp(resolved) {
       case q: LogicalPlan =>
@@ -77,22 +85,21 @@ case class ResolveQueryHints(snappySession: SnappySession)
 
   }
 
-  private def getIndexHints: mutable.Map[String, Option[LogicalPlan]] = {
-    val indexHint = Index.toString
-    val hints = snappySession.queryHints
-    if (hints.isEmpty) mutable.Map.empty
-    else hints.asScala.collect {
-      case (hint, value) if hint.startsWith(indexHint) =>
-        val tableOrAlias = hint.substring(indexHint.length)
+  private def getIndexHints: Map[String, Option[LogicalPlan]] = {
+    val indexHints = snappySession.getLastQueryIndexHints
+    if (indexHints.isEmpty) Map.empty
+    else indexHints.map {
+      case (hint, value) =>
+        val tableOrAlias = hint.substring(QueryHint.Index.lower.length).trim
         val tableIdent = snappySession.tableIdentifier(tableOrAlias)
-        val key = if (catalog.tableExists(tableIdent)) {
+        val key = if (!tableOrAlias.isEmpty && catalog.tableExists(tableIdent)) {
           catalog.resolveRelation(tableIdent) match {
             case lr: LogicalRelation if lr.relation.isInstanceOf[BaseColumnFormatRelation] =>
               lr.relation.asInstanceOf[BaseColumnFormatRelation].table
             case _ => tableOrAlias
           }
         } else tableOrAlias
-        val index = if (value.trim.length == 0) {
+        val index = if (key.isEmpty || value.isEmpty) {
           // if blank index mentioned,
           // we don't validate to find the index, instead consider that user is
           // disabling optimizer to choose index all together.
@@ -478,14 +485,10 @@ case class ResolveIndex(implicit val snappySession: SnappySession) extends Rule[
     val joinOrderHints = JoinOrderStrategy.getJoinOrderHints
     val enabled: Boolean = io.snappydata.Property.EnableExperimentalFeatures.
         get(snappySession.snappyContext.conf)
-    if (!enabled) {
-      return plan
-    }
-    val hints = snappySession.queryHints
-    if (!hints.isEmpty && hints.asScala.exists {
-      case (hint, _) => hint.startsWith(Index.toString) &&
-          !joinOrderHints.contains(ContinueOptimizations)
-    } || Entity.hasUnresolvedReferences(plan)) {
+    if (!enabled) return plan
+    val indexHints = snappySession.getLastQueryIndexHints
+    if ((indexHints.nonEmpty && !joinOrderHints.contains(ContinueOptimizations)) ||
+        Entity.hasUnresolvedReferences(plan)) {
       return plan
     }
 

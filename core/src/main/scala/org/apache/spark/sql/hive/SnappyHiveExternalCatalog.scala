@@ -51,8 +51,8 @@ import org.apache.spark.sql.catalyst.analysis.{NoSuchDatabaseException, NoSuchTa
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.util.StringUtils
+import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.collection.Utils.EMPTY_STRING_ARRAY
-import org.apache.spark.sql.collection.{ToolsCallbackInit, Utils}
 import org.apache.spark.sql.execution.RefreshMetadata
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
 import org.apache.spark.sql.hive.client.HiveClientImpl
@@ -128,8 +128,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
   /**
    * Retries on transient disconnect exceptions.
    */
-  protected[sql] def withHiveExceptionHandling[T](function: => T,
-      handleDisconnects: Boolean = true): T = synchronized {
+  protected[sql] def withHiveExceptionHandling[T](function: => T): T = synchronized {
     val skipFlags = GfxdDataDictionary.SKIP_CATALOG_OPS.get()
     val oldSkipCatalogCalls = skipFlags.skipHiveCatalogCalls
     val oldSkipLocks = skipFlags.skipDDLocks
@@ -847,13 +846,13 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
 
   private[hive] def closeHive(clearCache: Boolean): Unit = synchronized {
     if (clearCache) invalidateAll()
-    // Non-isolated client can be closed here directly which is only present in cluster mode
+    // Non-isolated client can be closed here directly which is only present in snappy-spark
     // using the new property HiveUtils.HIVE_METASTORE_ISOLATION not present in upstream.
-    // Isolated loader would require reflection but that case is only in snappy-core
-    // unit tests and will never happen in actual usage so ignored here.
-    if (ToolsCallbackInit.toolsCallback ne null) {
-      val client = hiveClient.asInstanceOf[HiveClientImpl]
-      if (client ne null) {
+    // Isolated loader would require reflection but that case is only in smart connector
+    // which will never use embedded mode SnappyHiveExternalCatalog but we do need to check
+    // for the case of local mode execution with upstream Spark.
+    hiveClient match {
+      case client: HiveClientImpl if !client.clientLoader.isolationOn =>
         val loader = client.clientLoader
         val hive = loader.cachedHive
         if (hive != null) {
@@ -861,7 +860,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
           Hive.set(hive.asInstanceOf[Hive])
           Hive.closeCurrent()
         }
-      }
+      case _ =>
     }
   }
 }
@@ -924,8 +923,7 @@ object SnappyHiveExternalCatalog extends SparkSupport {
 
   def close(): Unit = synchronized {
     if (instance ne null) {
-      instance.withHiveExceptionHandling(instance.closeHive(clearCache = true),
-        handleDisconnects = false)
+      instance.withHiveExceptionHandling(instance.closeHive(clearCache = true))
       instance = null
     }
   }

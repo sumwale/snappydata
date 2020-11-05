@@ -17,11 +17,13 @@
 
 package org.apache.spark.sql.execution.ui
 
-import java.util.NoSuchElementException
-import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 
-import org.apache.spark.SparkContext
+import scala.collection.JavaConverters._
+
+import org.apache.spark.SparkConf
 import org.apache.spark.scheduler.SparkListenerEvent
+import org.apache.spark.sql.internal.StaticSQLConf
 import org.apache.spark.sql.{CachedDataFrame, SparkListenerSQLPlanExecutionEnd, SparkListenerSQLPlanExecutionStart}
 import org.apache.spark.status.ElementTrackingStore
 
@@ -32,11 +34,9 @@ import org.apache.spark.status.ElementTrackingStore
  * executions only do the latter. This listener also shortens the SQL string
  * to display properly in the UI (CachedDataFrame already takes care of posting
  * the SQL string rather than method name unlike Spark).
- *
- * @param context the active SparkContext
  */
-class SnappySQLAppListener(context: SparkContext, val kvStore: ElementTrackingStore)
-    extends SQLAppStatusListener(context.conf, kvStore, live = true) {
+class SnappySQLAppListener(conf: SparkConf, kvStore: ElementTrackingStore)
+    extends SQLAppStatusListener(conf, kvStore, live = true) {
 
   private[this] val baseLiveExecutions: ConcurrentMap[Long, LiveExecutionData] = {
     val f = classOf[SQLAppStatusListener].getDeclaredFields
@@ -44,6 +44,19 @@ class SnappySQLAppListener(context: SparkContext, val kvStore: ElementTrackingSt
     f.setAccessible(true)
     f.get(this).asInstanceOf[ConcurrentMap[Long, LiveExecutionData]]
   }
+  private[this] val baseStageMetrics: ConcurrentMap[Int, LiveStageMetrics] = {
+    val f = classOf[SQLAppStatusListener].getDeclaredFields
+        .find(_.getName.contains("stageMetrics")).get
+    f.setAccessible(true)
+    f.get(this).asInstanceOf[ConcurrentMap[Int, LiveStageMetrics]]
+  }
+
+  /**
+   * Executions whose planning stage has ended but execution hasn't started.
+   */
+  private[this] val plannedExecutions =
+    new ConcurrentHashMap[Long, (LiveExecutionData, Seq[(Int, LiveStageMetrics)])]()
+  private[this] val plannedExecutionsMaxSize: Int = conf.get(StaticSQLConf.UI_RETAINED_EXECUTIONS)
 
   /**
    * Snappy's execution happens in two phases. First phase the plan is executed
@@ -74,35 +87,49 @@ class SnappySQLAppListener(context: SparkContext, val kvStore: ElementTrackingSt
         } else desc
 
       // check if execution was previously started by SparkListenerSQLPlanExecutionStart
-      // and restore the data if found
-      try {
-        val sqlStoreData = kvStore.read(classOf[SQLExecutionUIData], executionId)
-        val executionData = new LiveExecutionData(executionId)
-        executionData.description = description
-        executionData.details = details
-        executionData.physicalPlanDescription = physicalPlanDescription
-        executionData.metrics = sqlStoreData.metrics
-        executionData.submissionTime = time
-        executionData.completionTime = None // started again
-        executionData.jobs = sqlStoreData.jobs
-        executionData.stages = sqlStoreData.stages
-        executionData.metricsValues = sqlStoreData.metricValues
-        executionData.endEvents = sqlStoreData.jobs.size
-        // write immediately into KVStore (at least completionTime has changed)
-        executionData.write(kvStore, System.nanoTime())
-        baseLiveExecutions.put(executionId, executionData)
-      } catch {
-        case _: NoSuchElementException =>
+      // and restore the jobs/metrics data during planning phase
+      plannedExecutions.remove(executionId) match {
+        case null =>
           if (desc ne description) {
             super.onOtherEvent(SparkListenerSQLExecutionStart(executionId, description, details,
               physicalPlanDescription, sparkPlanInfo, time))
           } else super.onOtherEvent(event)
+        case (executionData, stageMetrics) =>
+          executionData.description = description
+          executionData.details = details
+          executionData.physicalPlanDescription = physicalPlanDescription
+          executionData.submissionTime = time
+          executionData.completionTime = None // started again
+          executionData.metricsValues = null // clear the aggregated metricValues
+          executionData.endEvents -= 1 // remove SparkListenerSQLPlanExecutionEnd's endEvent
+          // write immediately into KVStore (at least completionTime has changed)
+          executionData.write(kvStore, System.nanoTime())
+          baseLiveExecutions.put(executionId, executionData)
+          // push stageMetrics into the global tracking map
+          if (stageMetrics.nonEmpty) stageMetrics.foreach(p => baseStageMetrics.put(p._1, p._2))
       }
 
     case SparkListenerSQLPlanExecutionEnd(executionId, time) =>
       // SparkListenerSQLExecutionStart/End may never be fired for the query (e.g. for df.count)
       // so cleanup the live data but this will be restored on next SparkListenerSQLExecutionStart
-      super.onOtherEvent(SparkListenerSQLExecutionEnd(executionId, time))
+      baseLiveExecutions.get(executionId) match {
+        case null =>
+        case exec =>
+          // push any stageMetrics for execution into driverAccumUpdates
+          val stageMetrics = if (exec.stages.isEmpty) Nil else exec.stages.toSeq.collect {
+            case id if baseStageMetrics.containsKey(id) => id -> baseStageMetrics.get(id)
+          }
+          super.onOtherEvent(SparkListenerSQLExecutionEnd(executionId, time))
+          plannedExecutions.put(executionId, exec -> stageMetrics)
+          if (plannedExecutions.size() > plannedExecutionsMaxSize) {
+            val dummy = new java.util.Date(time + 1000000L)
+            val removeId = plannedExecutions.values().asScala.minBy(_._1.completionTime match {
+              case None => dummy
+              case Some(d) => d
+            })._1.executionId
+            plannedExecutions.remove(removeId)
+          }
+      }
 
     case _ => super.onOtherEvent(event)
   }

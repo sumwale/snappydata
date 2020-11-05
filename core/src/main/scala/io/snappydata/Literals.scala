@@ -23,6 +23,7 @@ import com.pivotal.gemfirexd.internal.engine.GfxdConstants
 
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
 import org.apache.spark.sql.internal.{AltName, SQLAltName, SQLConfigEntry}
+import org.apache.spark.sql.sources.JdbcExtendedUtils
 
 /**
  * Property names should be as per naming convention
@@ -98,16 +99,17 @@ object Property extends Enumeration {
 
   // TODO: SW: default to 'spark' and change to 'snappy' for JDBC/ODBC routed queries?
   // However, the row table behaviour is something we want to retain even for direct executions.
-  val HiveCompatibility: SQLValue[String] = SQLVal(
-    s"${Constant.PROPERTY_PREFIX}sql.hiveCompatibility", "Property on SnappySession to " +
+  val Compatibility: SQLValue[String] = SQLVal(
+    s"${Constant.PROPERTY_PREFIX}sql.compatibility", "Property on SnappySession to " +
         "alter the hive compatibility level. The level 'snappy' is Spark compatible except for " +
         "CREATE TABLE which defaults to SnappyData's row tables and double quoted values being " +
         "quoted identifiers and not string literals. A value of 'spark' makes it fully Spark " +
-        s"compatible where CREATE TABLE defaults to hive tables when catalogImplementation is " +
+        "compatible where CREATE TABLE defaults to hive when spark.sql.catalogImplementation is " +
         "'hive' for the session and double quoted values are string literals in SQL parsing. " +
-        "When set to 'full' then in addition to the behaviour with 'spark', it makes the " +
+        "When set to 'hive' then in addition to the behaviour with 'spark', it makes the " +
         "behavior hive compatible for statements like SHOW TABLES rather than being " +
-        "compatible with Spark SQL. Default is 'snappy'.", Some("snappy"), prefix = null)
+        "compatible with Spark SQL. Default is 'snappy' except for hive thrift server " +
+        "connections where the default is 'spark'.", Some("snappy"), prefix = null)
 
   val HiveServerUseHiveSession: SparkValue[Boolean] = Val(
     s"${Constant.PROPERTY_PREFIX}hiveServer.useHiveSession", "If true, then the session " +
@@ -394,25 +396,14 @@ object QueryHint extends Enumeration {
 
   case class HintValue(name: String, values: Vector[HintName.Type]) extends QueryHint.Val(name) {
 
+    val lower: String = JdbcExtendedUtils.toLowerCase(name)
+
     def get(hintValue: String): Option[HintName.Type] = values.find(_.contains(hintValue))
 
     override def toString: String = if (values.isEmpty) name else s"$name=${values.mkString(",")}"
   }
 
   type Type = HintValue
-
-  import scala.language.implicitConversions
-
-  implicit def toStr(h: Type): String = h.toString
-
-  def get(hint: String, allowed: Array[HintValue]): Option[HintValue] = {
-    var i = 0
-    while (i < allowed.length) {
-      if (hint.equalsIgnoreCase(allowed(i).name)) return Some(allowed(i))
-      i += 1
-    }
-    None
-  }
 
   /**
    * Query hint for SQL queries to serialize complex types (ARRAY, MAP, STRUCT)
@@ -472,7 +463,7 @@ object QueryHint extends Enumeration {
    *
    * Example:<br>
    * SELECT id, name, addr, medical_history FROM t1 --+ columnsAsClob(addr)
-   * SELECT id, name, addr, medical_history FROM t1 /*+ columnsAsClob(*) */
+   * SELECT /*+ columnsAsClob(*) */ id, name, addr, medical_history FROM t1
    */
   val ColumnsAsClob: Type = HintValue("columnsAsClob", Vector.empty)
 }

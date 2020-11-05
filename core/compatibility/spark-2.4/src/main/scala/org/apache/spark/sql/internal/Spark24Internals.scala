@@ -40,6 +40,7 @@ import org.apache.spark.sql.execution.{CacheManager, SparkOptimizer, SparkPlan}
 import org.apache.spark.sql.hive.{HiveSessionResourceLoader, SnappyAnalyzer, SnappyHiveExternalCatalog, SnappySessionState}
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.types.{BooleanType, DataType, Metadata, StructField, StructType}
+import org.apache.spark.ui.SparkUI
 import org.apache.spark.{SparkConf, SparkContext}
 
 /**
@@ -167,6 +168,10 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
 
   override def newSmartConnectorExternalCatalog(session: SparkSession): SnappyExternalCatalog = {
     new SmartConnectorExternalCatalog24(session)
+  }
+
+  override def detachHandler(ui: SparkUI, path: String): Unit = {
+    ui.detachHandler(path)
   }
 
   override def newSharedState(sparkContext: SparkContext): SnappySharedState = {

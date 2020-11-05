@@ -30,7 +30,7 @@ import org.json4s.JsonAST.JField
 
 import org.apache.spark.memory.{MemoryMode, TaskMemoryManager}
 import org.apache.spark.serializer.StructTypeSerializer
-import org.apache.spark.sql.SparkSupport
+import org.apache.spark.sql.{SnappySession, SparkSupport}
 import org.apache.spark.sql.catalyst.CatalystTypeConverters._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
@@ -246,10 +246,8 @@ final class TokenLiteral(_value: Any, _dataType: DataType)
  * equal to it, see SNAP-2462 for more details.
  */
 case class ParamLiteral(var value: Any, var dataType: DataType,
-    var pos: Int, @transient private[sql] val execId: Int,
-    private[sql] var tokenized: Boolean = false,
-    private[sql] var positionIndependent: Boolean = false,
-    @transient private[sql] var valueEquals: Boolean = false)
+    var pos: Int, @transient private[sql] val execId: Int = -1,
+    private var tokenized: Boolean = false)
     extends TokenizedLiteral with KryoSerializable {
 
   override def nullable: Boolean = (dataType eq NullType) || value == null
@@ -262,6 +260,8 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
 
   override def prettyName: String = "ParamLiteral"
 
+  def isTokenized: Boolean = tokenized
+
   def asLiteral: TokenLiteral = new TokenLiteral(value, dataType)
 
   override protected[sql] def jsonFields: List[JField] = asLiteral.jsonFields
@@ -270,8 +270,7 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
 
   override def hashCode(): Int = {
     if (tokenized) {
-      if (positionIndependent) dataType.hashCode()
-      else ClientResolverUtils.addIntToHashOpt(pos, dataType.hashCode())
+      ClientResolverUtils.addIntToHashOpt(pos, dataType.hashCode())
     } else {
       val valueHashCode = value match {
         case null => 0
@@ -283,24 +282,25 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
   }
 
   override def equals(obj: Any): Boolean = obj match {
-    case a: AnyRef if this eq a => true
     case r: RefParamLiteral if r.param ne null => r.referenceEquals(this)
     case l: ParamLiteral =>
-      // match by position only if "tokenized" else value comparison (no-caching case)
-      if (tokenized && !valueEquals) pos == l.pos && dataType == l.dataType
-      else dataType == l.dataType && valueEquals(l)
+      if (this eq l) true
+      // match by position only if "tokenized" (for cached LogicalPlan)
+      // else value comparison (for normal LogicalPlan)
+      else if (tokenized) l.tokenized && pos == l.pos && dataType == l.dataType
+      else !l.tokenized && dataType == l.dataType && valueEquals(l.value)
     case _ => false
   }
 
   override def semanticEquals(other: Expression): Boolean = equals(other)
 
-  private def valueEquals(p: ParamLiteral): Boolean = value match {
-    case null => p.value == null
-    case a: Array[Byte] => p.value match {
+  private def valueEquals(v: Any): Boolean = value match {
+    case null => v == null
+    case a: Array[Byte] => v match {
       case b: Array[Byte] => java.util.Arrays.equals(a, b)
       case _ => false
     }
-    case _ => value.equals(p.value)
+    case _ => value == v
   }
 
   override def write(kryo: Kryo, output: Output): Unit = {
@@ -308,7 +308,6 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
     StructTypeSerializer.writeType(kryo, output, dataType)
     output.writeVarInt(pos, true)
     output.writeBoolean(tokenized)
-    output.writeBoolean(positionIndependent)
   }
 
   override def read(kryo: Kryo, input: Input): Unit = {
@@ -316,7 +315,6 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
     dataType = StructTypeSerializer.readType(kryo, input)
     pos = input.readVarInt(true)
     tokenized = input.readBoolean()
-    positionIndependent = input.readBoolean()
   }
 
   override def valueString: String = value match {
@@ -363,8 +361,8 @@ case class ParamLiteral(var value: Any, var dataType: DataType,
  * and falls back to behaving like a regular ParamLiteral since the required analysis and
  * other phases are already done, and final code generation requires a copy of the values.
  */
-final class RefParamLiteral(val param: ParamLiteral, _value: Any, _dataType: DataType, _pos: Int)
-    extends ParamLiteral(_value, _dataType, _pos, execId = param.execId) {
+final class RefParamLiteral(val param: ParamLiteral, _pos: Int)
+    extends ParamLiteral(param.value, param.dataType, _pos, param.execId, param.isTokenized) {
 
   assert(!param.isInstanceOf[RefParamLiteral])
 
@@ -383,11 +381,17 @@ final class RefParamLiteral(val param: ParamLiteral, _value: Any, _dataType: Dat
 
   override def equals(obj: Any): Boolean = {
     if (param ne null) obj match {
-      case a: AnyRef if this eq a => true
-      case r: RefParamLiteral => param == r.param
+      case r: RefParamLiteral => (this eq r) || param.equals(r.param)
       case l: ParamLiteral => referenceEquals(l)
       case _ => false
     } else super.equals(obj)
+  }
+
+  override def toString: String = if (param ne null) param.toString else super.toString
+
+  override def copy(value: Any = value, dataType: DataType = dataType,
+      pos: Int = pos, execId: Int = execId, tokenized: Boolean = isTokenized): ParamLiteral = {
+    new RefParamLiteral(param.copy(value, dataType, pos, execId, tokenized), pos)
   }
 }
 
@@ -438,7 +442,10 @@ trait ParamLiteralHolder {
   @transient
   protected final var paramListId = 0
 
-  private[sql] final def getAllLiterals: Array[ParamLiteral] = parameterizedConstants.toArray
+  private[sql] final def getAllLiterals: Array[ParamLiteral] = {
+    if (parameterizedConstants.isEmpty) SnappySession.EMPTY_PARAMS
+    else parameterizedConstants.toArray
+  }
 
   private[sql] final def getCurrentParamsId: Int = paramListId
 
@@ -500,7 +507,7 @@ trait ParamLiteralHolder {
         // In addition RefParamLiteral maintains its own copy of value to avoid updating
         // the referenced ParamLiteral's value by functions like ROUND, so that needs to
         // be changed too when a plan with updated tokens is created.
-        val ref = new RefParamLiteral(existing, value, dataType, numConstants)
+        val ref = new RefParamLiteral(existing, numConstants)
         parameterizedConstants += ref
         ref
     }

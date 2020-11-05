@@ -54,7 +54,7 @@ import org.apache.spark.sql.types.{DataType, Metadata, StructField, StructType}
 import org.apache.spark.status.api.v1.RDDStorageInfo
 import org.apache.spark.streaming.SnappyStreamingContext
 import org.apache.spark.streaming.dstream.DStream
-import org.apache.spark.ui.WebUITab
+import org.apache.spark.ui.{SparkUI, WebUITab}
 import org.apache.spark.util.Utils
 import org.apache.spark.{Logging, SparkConf, SparkContext, SparkEnv}
 
@@ -210,6 +210,11 @@ trait SparkInternals extends Logging {
   def newCaseInsensitiveMap(map: Map[String, String]): Map[String, String]
 
   /**
+   * Remove static handler having given path from [[SparkUI]].
+   */
+  def detachHandler(ui: SparkUI, path: String): Unit
+
+  /**
    * Remove all SQLTabs except the one passed (which can be null).
    */
   def removeSQLTabs(sparkContext: SparkContext, except: Option[WebUITab]): Unit = {
@@ -219,7 +224,7 @@ trait SparkInternals extends Logging {
         ui.getTabs.foreach {
           case tab: SQLTab if tab ne skipTab =>
             ui.detachTab(tab)
-            ui.getHandlers.find(_.getContextPath == "/static/sql").foreach(ui.detachHandler)
+            detachHandler(ui, "/static/sql")
           case _ =>
         }
       case _ =>
@@ -835,6 +840,11 @@ trait SparkInternals extends Logging {
    */
   def newHashClusteredDistribution(expressions: Seq[Expression],
       requiredNumPartitions: Option[Int] = None): Distribution
+
+  /**
+   * Create a new HashPartitioning given a Clustered/HashClusteredDistribution.
+   */
+  def newClusteredPartitioning(distribution: Distribution, numPartitions: Int): Partitioning
 
   /**
    * Create table definition in the catalog.

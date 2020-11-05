@@ -49,7 +49,7 @@ class StoreStrategy(sessionState: SnappySessionState) extends Strategy with Spar
     case i@InsertIntoPlan(l, query, overwrite) =>
       val preAction = if (overwrite) () => i.relation.truncate() else () => ()
       val childPlan = new QueryExecution(sessionState.snappySession, query).sparkPlan
-      ExecutePlan(i.relation.getInsertPlan(l, childPlan), preAction) :: Nil
+      ExecutePlan(l, i.relation.getInsertPlan(l, childPlan), preAction) :: Nil
 
     case d@DMLExternalTable(table, cmd) => findLogicalRelation[BaseRelation](table) match {
       case Some(l) => ExecutedCommandExec(ExternalTableDMLCmd(l, cmd, d.output)) :: Nil
@@ -57,32 +57,32 @@ class StoreStrategy(sessionState: SnappySessionState) extends Strategy with Spar
     }
 
     case PutIntoTable(table, query) => findLogicalRelation[RowPutRelation](table) match {
-      case Some(l) => ExecutePlan(l.relation.asInstanceOf[RowPutRelation].getPutPlan(
+      case Some(l) => ExecutePlan(l, l.relation.asInstanceOf[RowPutRelation].getPutPlan(
         l, planLater(query))) :: Nil
       case _ => Nil
     }
 
     case PutIntoColumnTable(t, left, right) => findLogicalRelation[BulkPutRelation](t) match {
-      case Some(l) => ExecutePlan(l.relation.asInstanceOf[BulkPutRelation].getPutPlan(
+      case Some(l) => ExecutePlan(l, l.relation.asInstanceOf[BulkPutRelation].getPutPlan(
         planLater(left), planLater(right))) :: Nil
       case _ => Nil
     }
 
     case Update(table, child, keyColumns, updateColumns, updateExpressions) =>
       findLogicalRelation[MutableRelation](table) match {
-        case Some(l) => ExecutePlan(l.relation.asInstanceOf[MutableRelation].getUpdatePlan(
+        case Some(l) => ExecutePlan(l, l.relation.asInstanceOf[MutableRelation].getUpdatePlan(
           l, planLater(child), updateColumns, updateExpressions, keyColumns)) :: Nil
         case _ => Nil
       }
 
     case Delete(table, child, keyColumns) => findLogicalRelation[MutableRelation](table) match {
-      case Some(l) => ExecutePlan(l.relation.asInstanceOf[MutableRelation].getDeletePlan(
+      case Some(l) => ExecutePlan(l, l.relation.asInstanceOf[MutableRelation].getDeletePlan(
         l, planLater(child), keyColumns)) :: Nil
       case _ => Nil
     }
 
     case DeleteFromTable(table, query) => findLogicalRelation[DeletableRelation](table) match {
-      case Some(l) => ExecutePlan(l.relation.asInstanceOf[DeletableRelation].getDeletePlan(
+      case Some(l) => ExecutePlan(l, l.relation.asInstanceOf[DeletableRelation].getDeletePlan(
         l, planLater(query), query.output)) :: Nil
       case _ => Nil
     }

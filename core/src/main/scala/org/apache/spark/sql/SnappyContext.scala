@@ -950,11 +950,9 @@ object SnappyContext extends SparkSupport with Logging {
    * @return
    */
   def apply(): SnappyContext = {
-    if (_globalContextInitialized) {
-      val sc = globalSparkContext
-      if (sc ne null) {
-        new SnappyContext(sc)
-      } else null
+    val sc = globalSparkContext
+    if ((sc ne null) && !sc.isStopped) {
+      new SnappyContext(sc)
     } else null
   }
 
@@ -964,7 +962,7 @@ object SnappyContext extends SparkSupport with Logging {
    * @return
    */
   def apply(sc: SparkContext): SnappyContext = {
-    if (sc ne null) {
+    if ((sc ne null) && !sc.isStopped) {
       new SnappyContext(sc)
     } else {
       apply()
@@ -1232,10 +1230,10 @@ object SnappyContext extends SparkSupport with Logging {
   }
 
   private def stopSnappyContext(): Unit = synchronized {
-    val sc = globalSparkContext
     if (_globalContextInitialized) {
       SnappyTableStatsProviderService.stop()
 
+      val sc = globalSparkContext
       // clear current hive catalog connection
       getClusterMode(sc) match {
         case _: ThinClientConnectorMode => ConnectorExternalCatalog.close()

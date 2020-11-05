@@ -188,7 +188,7 @@ class SparkSQLExecuteImpl(val sql: String,
     SparkSQLExecuteImpl.serializeRows(out, hasMetadata, hdos)
 
   private lazy val (tableNames, nullability) = SparkSQLExecuteImpl.
-      getTableNamesAndNullability(session, df.queryExecution.analyzed.output)
+      getTableNamesAndNullability(df.queryExecution.analyzed.output)
 
   def getColumnNames: Array[String] = {
     querySchema.fieldNames
@@ -206,16 +206,16 @@ class SparkSQLExecuteImpl(val sql: String,
 
 object SparkSQLExecuteImpl {
 
-  def getJsonProperties(session: SnappySession): Boolean = session.getPreviousQueryHints.get(
-    QueryHint.ComplexTypeAsJson.toString) match {
-    case null => Constant.COMPLEX_TYPE_AS_JSON_DEFAULT
-    case v => ClientSharedUtils.parseBoolean(v)
+  def getJsonProperties(session: SnappySession): Boolean = session.getLastQueryHint(
+    QueryHint.ComplexTypeAsJson) match {
+    case None => Constant.COMPLEX_TYPE_AS_JSON_DEFAULT
+    case Some(v) => ClientSharedUtils.parseBoolean(v)
   }
 
   def getClobProperties(session: SnappySession): (Boolean, Set[String]) =
-    session.getPreviousQueryHints.get(QueryHint.ColumnsAsClob.toString) match {
-    case null => (false, Set.empty[String])
-    case v => Utils.parseColumnsAsClob(v, session)
+    session.getLastQueryHint(QueryHint.ColumnsAsClob) match {
+    case None => (false, Set.empty[String])
+    case Some(v) => Utils.parseColumnsAsClob(v, session)
   }
 
   def getSQLType(dataType: DataType, complexTypeAsJson: Boolean,
@@ -280,7 +280,7 @@ object SparkSQLExecuteImpl {
     }
   }
 
-  def getTableNamesAndNullability(session: SnappySession,
+  def getTableNamesAndNullability(
       output: Seq[expressions.Attribute]): (Seq[String], Seq[Boolean]) = {
     output.map { a =>
       val fn = a.qualifiedName

@@ -307,8 +307,8 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
       if (leftPartCols ne Nil) {
         val (keyOrder, allPartPresent) = getKeyOrder(left, leftKeys, leftPartCols)
         if (allPartPresent) {
-          val leftOrderedKeys = keyOrder.zip(leftKeys).sortWith(_._1 < _._1).unzip._2
-          val rightOrderedKeys = keyOrder.zip(rightKeys).sortWith(_._1 < _._1).unzip._2
+          val leftOrderedKeys = keyOrder.zip(leftKeys).sortWith(_._1 < _._1).map(_._2)
+          val rightOrderedKeys = keyOrder.zip(rightKeys).sortWith(_._1 < _._1).map(_._2)
           (leftOrderedKeys, rightOrderedKeys)
         } else {
           (leftKeys, rightKeys)
@@ -316,8 +316,8 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
       } else if (rightPartCols ne Nil) {
         val (keyOrder, allPartPresent) = getKeyOrder(right, rightKeys, rightPartCols)
         if (allPartPresent) {
-          val leftOrderedKeys = keyOrder.zip(leftKeys).sortWith(_._1 < _._1).unzip._2
-          val rightOrderedKeys = keyOrder.zip(rightKeys).sortWith(_._1 < _._1).unzip._2
+          val leftOrderedKeys = keyOrder.zip(leftKeys).sortWith(_._1 < _._1).map(_._2)
+          val rightOrderedKeys = keyOrder.zip(rightKeys).sortWith(_._1 < _._1).map(_._2)
           (leftOrderedKeys, rightOrderedKeys)
         } else {
           (leftKeys, rightKeys)
@@ -768,12 +768,12 @@ abstract class SnappyAnalyzer(catalog: SessionCatalog, conf: SQLConf)
     }
   }
 
-  /*
-    SnappyPromoteStrings is applied before Spark's TypeCoercion.PromoteStrings rule.
-    Spark PromoteStrings rule causes issues in prepared statements by replacing ParamLiteral
-    with NULL in case of BinaryComparison with left node being StringType and right being
-    ParamLiteral (or vice-versa) as by default ParamLiteral data type is NullType. In such a case,
-    this rule converts ParamLiteral type to StringType to prevent it being replaced by NULL
+  /**
+   * SnappyPromoteStrings is applied before Spark's TypeCoercion.PromoteStrings rule.
+   * Spark PromoteStrings rule causes issues in prepared statements by replacing ParamLiteral
+   * with NULL in case of BinaryComparison with left node being StringType and right being
+   * ParamLiteral (or vice-versa) as by default ParamLiteral data type is NullType. In such a case,
+   * this rule converts ParamLiteral type to StringType to prevent it being replaced by NULL
    */
   object SnappyPromoteStrings extends Rule[LogicalPlan] with SparkSupport {
     override def apply(plan: LogicalPlan): LogicalPlan = {
@@ -782,11 +782,11 @@ abstract class SnappyAnalyzer(catalog: SessionCatalog, conf: SQLConf)
         case p@BinaryComparison(left@StringType(), right@QuestionMark(_))
           if right.dataType == NullType =>
           p.makeCopy(Array(left,
-            ParamLiteral(right.value, StringType, right.pos, execId = -1, tokenized = true)))
+            ParamLiteral(right.value, StringType, right.pos)))
         case p@BinaryComparison(left@QuestionMark(_), right@StringType())
           if left.dataType == NullType =>
           p.makeCopy(Array(
-            ParamLiteral(left.value, StringType, left.pos, execId = -1, tokenized = true),
+            ParamLiteral(left.value, StringType, left.pos),
             right))
       }
     }

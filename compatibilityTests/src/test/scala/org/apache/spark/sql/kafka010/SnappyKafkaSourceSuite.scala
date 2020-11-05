@@ -21,7 +21,11 @@ import org.apache.spark.sql.SnappySession
 import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil, TestSnappySession}
 
 class SnappyKafkaContinuousSourceSuite extends KafkaContinuousSourceSuite
-    with SharedSnappySessionContext with SnappySparkTestUtil
+    with SnappyKafkaContinuousTest with SnappySparkTestUtil
+
+class SnappyKafkaContinuousSourceTopicDeletionSuite
+    extends KafkaContinuousSourceTopicDeletionSuite
+        with SnappyKafkaContinuousTest with SnappySparkTestUtil
 
 class SnappyKafkaMicroBatchSourceSuiteBase extends KafkaMicroBatchSourceSuiteBase
     with SharedSnappySessionContext with SnappySparkTestUtil
@@ -37,11 +41,28 @@ class SnappyKafkaSourceStressSuite extends KafkaSourceStressSuite
 
 class SnappyKafkaSourceStressForDontFailOnDataLossSuite
     extends KafkaSourceStressForDontFailOnDataLossSuite
-        with SharedSnappySessionContext with SnappySparkTestUtil {
+        with SnappyKafkaMissingOffsetsTest with SnappySparkTestUtil
 
+class SnappyKafkaDontFailOnDataLossSuite extends KafkaDontFailOnDataLossSuite
+    with SnappyKafkaMissingOffsetsTest with SnappySparkTestUtil
+
+trait SnappyKafkaContinuousTest extends SharedSnappySessionContext {
+  override protected def createSparkSession: SnappySession = {
+    // We need more than the default local[2] to be able to schedule all partitions simultaneously.
+    val session = new TestSnappySession(
+      new SparkContext("local[10]", "continuous-stream-test-sql-context",
+        snappySparkConf.set("spark.sql.testkey", "true")))
+    session.setCurrentSchema("default")
+    session
+  }
+}
+
+trait SnappyKafkaMissingOffsetsTest extends SharedSnappySessionContext {
   override def createSparkSession: SnappySession = {
     // Set maxRetries to 3 to handle NPE from `poll` when deleting a topic
-    new TestSnappySession(
-      new SparkContext("local[2,3]", "test-sql-context", sparkConf))
+    val session = new TestSnappySession(
+      new SparkContext("local[4,3]", "test-sql-context", snappySparkConf))
+    session.setCurrentSchema("default")
+    session
   }
 }

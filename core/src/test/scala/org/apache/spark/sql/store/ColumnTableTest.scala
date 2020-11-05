@@ -49,6 +49,14 @@ class ColumnTableTest
         with BeforeAndAfter
         with BeforeAndAfterAll {
 
+  val tableName: String = "ColumnTable"
+
+  val props = Map.empty[String, String]
+
+  val options = "OPTIONS (PARTITION_BY 'col1')"
+
+  val optionsWithURL = "OPTIONS (PARTITION_BY 'Col1', URL 'jdbc:snappydata:;')"
+
   after {
     snc.dropTable(tableName, ifExists = true)
     snc.dropTable("ROW_TABLE2", ifExists = true)
@@ -62,16 +70,6 @@ class ColumnTableTest
     snc.dropTable("COLUMN_TEST_TABLE9", ifExists = true)
     snc.dropTable("COLUMN_TEST_TABLE10", ifExists = true)
   }
-
-  val tableName: String = "ColumnTable"
-
-  val props = Map.empty[String, String]
-
-
-  val options = "OPTIONS (PARTITION_BY 'col1')"
-
-  val optionsWithURL = "OPTIONS (PARTITION_BY 'Col1', URL 'jdbc:snappydata:;')"
-
 
   private def checkSetSchema(pattern: String, schemaName: String,
       tableName: String, df: DataFrame, startCount: Int, size: Int): Int = {
@@ -107,10 +105,10 @@ class ColumnTableTest
     assert(result.count() === count)
 
     val tempView = s"TABLE_VIEW_$tableName"
-    df.createOrReplaceTempView(tempView)
 
-    // check success with quoted schema but case as passed since table names are case-insensitive
+    // check success with quoted schema and table name case as passed
     snc.sql("set spark.sql.caseSensitive = true")
+    df.createOrReplaceTempView(tempView)
     snc.sql(String.format(pattern, "`" + schemaName + "`"))
     snc.sql(s"insert into $tableName select * from $tempView")
     count += size

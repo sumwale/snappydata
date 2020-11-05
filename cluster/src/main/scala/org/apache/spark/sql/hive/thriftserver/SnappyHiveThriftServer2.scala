@@ -19,6 +19,7 @@ package org.apache.spark.sql.hive.thriftserver
 
 import java.net.InetAddress
 
+import io.snappydata.Property
 import org.apache.hadoop.hive.ql.metadata.Hive
 import org.apache.hive.service.cli.thrift.ThriftCLIService
 import org.apache.log4j.{Level, LogManager}
@@ -49,6 +50,14 @@ object SnappyHiveThriftServer2 extends Logging {
     SparkSQLEnv.sqlContext = sparkSession.sqlContext
     SparkSQLEnv.sparkContext = sc
     sparkSession.conf.set(HiveUtils.FAKE_HIVE_VERSION.key, HiveUtils.builtinHiveVersion)
+    // set planCaching to true by default
+    if (!sparkSession.conf.contains(Property.PlanCaching.name)) {
+      sparkSession.conf.set(Property.PlanCaching.name, "true")
+    }
+    // default compatibility-level is "spark"
+    if (!sparkSession.conf.contains(Property.Compatibility.name)) {
+      sparkSession.conf.set(Property.Compatibility.name, "spark")
+    }
 
     // New executionHive is used to get the HiveServer2 configuration. When SnappySession
     // is being used then only the hive server2 settings are copied from it while the
@@ -92,7 +101,7 @@ object SnappyHiveThriftServer2 extends Logging {
     }
 
     val server = new HiveThriftServer2(SparkSQLEnv.sqlContext)
-    externalCatalog.withHiveExceptionHandling({
+    externalCatalog.withHiveExceptionHandling {
       server.init(hiveConf)
       server.start()
       getHostPort(server) match {
@@ -102,7 +111,7 @@ object SnappyHiveThriftServer2 extends Logging {
       HiveThriftServer2.listener = new HiveThriftServer2Listener(
         server, SparkSQLEnv.sqlContext.conf)
       sc.addSparkListener(HiveThriftServer2.listener)
-    }, handleDisconnects = false)
+    }
     server
   }
 

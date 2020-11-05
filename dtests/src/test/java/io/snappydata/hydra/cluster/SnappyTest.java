@@ -248,7 +248,7 @@ public class SnappyTest implements Serializable {
         List<File> files = (List<File>) FileUtils.listFiles(baseDir, filter, TrueFileFilter.INSTANCE);
         Log.getLogWriter().info("Jar file found: " + Arrays.asList(files));
         for (File file1 : files) {
-          if (!file1.getAbsolutePath().contains("/work/") || !file1.getAbsolutePath().contains("/scala-2.10/"))
+          if (!file1.getAbsolutePath().contains("/work/") || !file1.getAbsolutePath().contains("/scala-2.11/"))
             userAppJarPath = file1.getAbsolutePath();
         }
       } catch (Exception e) {
@@ -3681,7 +3681,7 @@ public class SnappyTest implements Serializable {
     String masterHost = (String) SnappyBB.getBB().getSharedMap().get("masterHost");
     if (masterHost == null) {
       try {
-        File log = new File(".");
+        File log = new File(productDir + sep + "logs");
         String dest = log.getCanonicalPath();
         String masterFileName = "spark-*.Master-1-*.out";
         String masterFilePath = snappyTest.getUserAppJarLocation(masterFileName, dest);

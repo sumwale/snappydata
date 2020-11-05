@@ -335,8 +335,7 @@ object QueryRoutingDUnitSecurityTest {
       var thrown = intercept[SQLException] {
         stmt2.executeQuery(s"select * from $schema.version")
       }
-      assert(thrown.getMessage.contains("Invalid input \"SNAPPY_HIVE_METASTORE.v\"," +
-          " expected ws, test or relations"))
+      assert(thrown.getMessage.contains("Invalid input \"SNAPPY_HIVE_METASTORE.v\""))
 
       thrown = intercept[SQLException] {
         stmt2.execute(s"insert into $schema.version values (2, '1.2.1', 'dummy comm v2')")

@@ -70,7 +70,7 @@ class SparkSQLPrepareImpl(val sql: String,
     thresholdListener, sql, false, senderVersion)
 
   private lazy val (tableNames, nullability) = SparkSQLExecuteImpl.
-      getTableNamesAndNullability(session, analyzedPlan.output)
+      getTableNamesAndNullability(analyzedPlan.output)
 
   private lazy val (columnNames, columnDataTypes) = SparkSQLPrepareImpl.
       getTableNamesAndDatatype(analyzedPlan.output)
@@ -160,7 +160,7 @@ object SparkSQLPrepareImpl extends SparkSupport {
 
   def addParamLiteral(position: Int, datatype: DataType, nullable: Boolean,
     result: mutable.HashSet[ParamLiteral]): Unit = if (!result.exists(_.pos == position)) {
-    result += ParamLiteral(nullable, datatype, position, execId = -1, tokenized = true)
+    result += ParamLiteral(nullable, datatype, position, tokenized = true)
   }
 
   def handleCase(branches: Seq[(Expression, Expression)], elseValue: Option[Expression],

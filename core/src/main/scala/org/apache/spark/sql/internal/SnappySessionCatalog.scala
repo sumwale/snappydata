@@ -416,6 +416,7 @@ trait SnappySessionCatalog extends SessionCatalog with SparkSupport {
     checkSchemaPermission(schemaName, table = "", defaultUser = null, ignoreIfNotExists)
 
     if (cascade) {
+      logInfo(s"CASCADE drop all database objects in $schemaName: ${snappyExternalCatalog.listTables(schemaName)}")
       // drop all the tables in order first, dependents followed by others
       val allTables = snappyExternalCatalog.listTables(schemaName).flatMap(
         table => snappyExternalCatalog.getTableIfExists(schemaName, formatTableName(table)))

@@ -94,7 +94,7 @@ object LocalSparkConf {
     val conf = new SparkConf()
         .setIfMissing("spark.master", "local[4]")
         .setIfMissing("spark.memory.debugFill", "true")
-        .set("snappydata.sql.planCaching", random.nextBoolean().toString)
+        .set("snappydata.sql.planCaching", "true") // random.nextBoolean().toString)
         .set(Property.TestDisableCodeGenFlag.name , "true")
         .set(Property.UseOptimizedHashAggregateForSingleKey.name, "true")
         .setAppName(getClass.getName)

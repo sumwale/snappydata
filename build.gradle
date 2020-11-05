@@ -125,7 +125,7 @@ allprojects {
     sparkPackageName = "snappydata-${version}_${sparkConnectorVersion}-s_${scalaBinaryVersion}"
 
     sparkConnectorDistName = "spark-${sparkConnectorVersion}-bin-hadoop2.7"
-    sparkCurrentVersion = '3.0.0'
+    sparkCurrentVersion = '2.4.7'
     sparkCurrentDistName = "spark-${sparkCurrentVersion}-bin-hadoop2.7"
     log4jVersion = '1.2.17'
     slf4jVersion = '1.7.30'

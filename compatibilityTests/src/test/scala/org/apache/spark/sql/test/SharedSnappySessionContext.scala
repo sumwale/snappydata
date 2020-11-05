@@ -18,7 +18,7 @@ package org.apache.spark.sql.test
 
 import scala.util.Random
 
-import org.apache.spark.DebugFilesystem
+import org.apache.spark.{DebugFilesystem, SparkConf}
 import org.apache.spark.sql.SnappySession
 import org.apache.spark.sql.test.SharedSnappySessionContext.random
 
@@ -29,7 +29,7 @@ trait SharedSnappySessionContext extends SharedSQLContext {
 
   protected def codegenFallback: Boolean = false
 
-  override protected def createSparkSession: SnappySession = {
+  protected def snappySparkConf: SparkConf = {
     /**
      * Pls do not change the flag values of snappydaya.sql.TestDisableCodeGenFlag
      * and snappydaya.sql.UseOptimizedHashAggregateForSingleKey.name
@@ -38,17 +38,21 @@ trait SharedSnappySessionContext extends SharedSQLContext {
      * If your test needs CodegenFallback, then override the newConf function
      * & clear the flag from the conf of the test locally.
      */
-    val session = new TestSnappySession(sparkConf
+    super.sparkConf
         .set("spark.hadoop.fs.file.impl", classOf[DebugFilesystem].getName)
         .set("spark.sql.codegen.fallback", codegenFallback.toString)
-        .set("snappydata.sql.hiveCompatibility", "spark")
+        .set("snappydata.sql.compatibility", "spark")
         // use a session cache which is disabled by default in SnappyData (since
         //   a cache is already present in ExternalCatalog implementations that handles
         //   invalidation properly for the smart connector case)
         .set("spark.sql.filesourceTableRelationCacheSize", "100")
         .set("snappydata.sql.planCaching.", random.nextBoolean().toString)
         .set("snappydata.sql.disableCodegenFallback", "true")
-        .set("snappydata.sql.useOptimizedHashAggregateForSingleKey", "true"))
+        .set("snappydata.sql.useOptimizedHashAggregateForSingleKey", "true")
+  }
+
+  override protected def createSparkSession: SnappySession = {
+    val session = new TestSnappySession(snappySparkConf)
     session.setCurrentSchema("default")
     session
   }

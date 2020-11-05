@@ -16,18 +16,16 @@
  */
 package org.apache.spark.sql.kafka010
 
-import org.apache.spark.DebugFilesystem
-import org.apache.spark.sql.SnappySession
-import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil, TestSnappySession}
+import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil}
 
 class SnappyKafkaSinkSuite extends KafkaSinkSuite
-with SharedSnappySessionContext with SnappySparkTestUtil {
-    override def createSparkSession: SnappySession = {
-        sparkConf.set("spark.hadoop.fs.file.impl", classOf[DebugFilesystem].getName)
+    with SharedSnappySessionContext with SnappySparkTestUtil {
 
-        // setting case sensitivity to true to pass some failing tests.
-        // See https://jira.snappydata.io/browse/SNAP-2732
-        sparkConf.set("spark.sql.caseSensitive", "true")
-        new TestSnappySession(sparkConf)
-    }
+  override def skipped: Seq[String] = Seq(
+    // takes long time to run and does basic check which is fine with just SparkSession testing
+    "streaming - write to non-existing topic"
+  )
 }
+
+class SnappyKafkaContinuousSinkSuite extends KafkaContinuousSinkSuite
+    with SnappyKafkaContinuousTest with SnappySparkTestUtil

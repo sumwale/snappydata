@@ -299,8 +299,7 @@ class CreateIndexTest extends SnappyFunSuite with BeforeAndAfterEach {
     dataDF.write.insertInto(table3)
   }
 
-  // TODO: fails with Spark 2.4
-  ignore("Test two table joins") {
+  test("Test two table joins") {
     val table1 = "tabOne"
     val table2 = "tabTwo"
     val table3 = "tabThree"
@@ -403,7 +402,7 @@ class CreateIndexTest extends SnappyFunSuite with BeforeAndAfterEach {
     try {
       executeQ(s"select * from (select * from $table1 ) t1 /*+ ${QueryHint.Index}($index1) */" +
           s", $table3 t2 where t1.col1 = t2.col1")
-      fail(s"exepected AnalysisException as ${QueryHint.Index}" +
+      fail(s"expected AnalysisException as ${QueryHint.Index}" +
           s" hint cannot be specified on derived tables")
     } catch {
       case ae: AnalysisException if ae.message.contains(s"${QueryHint.Index}") =>

@@ -183,7 +183,7 @@ final class PooledKryoSerializer(conf: SparkConf)
   }
 
   override def newInstance(): PooledKryoSerializerInstance = {
-    new PooledKryoSerializerInstance(this)
+    new PooledKryoSerializerInstance
   }
 
   private[spark] override lazy val supportsRelocationOfSerializedObjects: Boolean = {
@@ -307,9 +307,7 @@ object KryoSerializerPool {
   }
 }
 
-private[spark] final class PooledKryoSerializerInstance(
-    pooledSerializer: PooledKryoSerializer)
-    extends SerializerInstance with Logging {
+private[spark] final class PooledKryoSerializerInstance extends SerializerInstance with Logging {
 
   override def serialize[T: ClassTag](t: T): ByteBuffer = {
 

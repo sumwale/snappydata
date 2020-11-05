@@ -33,9 +33,9 @@ import io.snappydata.test.dunit._
 import io.snappydata.util.TestUtils
 import org.slf4j.LoggerFactory
 
-import org.apache.spark.sql.{SnappyContext, SnappySession}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.ConnectionPool
+import org.apache.spark.sql.{SnappyContext, SnappySession}
 import org.apache.spark.{Logging, SparkContext}
 /**
  * Base class for tests using Snappy ClusterManager. New utility methods
@@ -119,7 +119,8 @@ abstract class ClusterManagerTestBase(s: String)
 
   override def beforeClass(): Unit = {
     super.beforeClass()
-    val logger = LoggerFactory.getLogger(getClass)
+    val thisClass = getClass
+    val logger = LoggerFactory.getLogger(thisClass)
     logger.info("Boot properties:" + bootProps)
 
     doSetUp()
@@ -140,8 +141,8 @@ abstract class ClusterManagerTestBase(s: String)
         }
         assert(loc.status == FabricService.State.RUNNING)
 
-        val logger = LoggerFactory.getLogger(getClass)
-        logger.info("\n\n\n  STARTING TESTS IN " + getClass.getName + "\n\n")
+        val logger = LoggerFactory.getLogger(thisClass)
+        logger.info("\n\n\n  STARTING TESTS IN " + thisClass.getName + "\n\n")
       }
     })
     val nodeProps = bootProps
@@ -155,8 +156,8 @@ abstract class ClusterManagerTestBase(s: String)
         assert(ServiceManager.currentFabricServiceInstance.status ==
             FabricService.State.RUNNING)
 
-        val logger = LoggerFactory.getLogger(getClass)
-        logger.info("\n\n\n  STARTING TESTS IN " + getClass.getName + "\n\n")
+        val logger = LoggerFactory.getLogger(thisClass)
+        logger.info("\n\n\n  STARTING TESTS IN " + thisClass.getName + "\n\n")
       }
     }
 
@@ -167,12 +168,15 @@ abstract class ClusterManagerTestBase(s: String)
       }
     })
     // start lead node in this VM
-    val sc = SnappyContext.globalSparkContext
+    var sc = SnappyContext.globalSparkContext
     if (sc == null || sc.isStopped) {
       startSnappyLead(locatorPort, bootProps.clone().asInstanceOf[java.util.Properties])
     }
-    assert(ServiceManager.currentFabricServiceInstance.status ==
-        FabricService.State.RUNNING)
+    assert(ServiceManager.currentFabricServiceInstance.status == FabricService.State.RUNNING)
+    assert(SnappyContext(sc) != null)
+
+    sc = SnappyContext.globalSparkContext
+    logger.info(s"Using $sc for the tests of this class.")
   }
 
   override def setUp(): Unit = {
@@ -313,15 +317,18 @@ object ClusterManagerTestBase extends Logging {
 
   def cleanupTestData(testClass: String, testName: String, inst: ClusterManagerTestBase): Unit = {
     // cleanup metastore
+    val reason = if (testName ne null) s"for $testClass.$testName" else "before stop"
+    logInfo("Cleaning test data " + reason)
     if (Misc.getMemStoreBootingNoThrow eq null) return
     val snc = SnappyContext()
-    if (snc != null) {
+    if (snc ne null) {
       val session = snc.snappySession
       if (inst ne null) inst.initSessionForCleanup(session)
       TestUtils.resetAllFunctions(session)
+      logInfo("Dropping all database objects " + reason)
       TestUtils.dropAllSchemas(session)
     }
-    if (testName != null) {
+    if (testName ne null) {
       logInfo("\n\n\n  ENDING TEST " + testClass + '.' + testName + "\n\n")
     }
   }

@@ -17,6 +17,16 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil}
+import org.apache.spark.{SparkConf, SparkContext}
 
 class SnappySerializationSuite extends SerializationSuite
-    with SharedSnappySessionContext with SnappySparkTestUtil
+    with SharedSnappySessionContext with SnappySparkTestUtil {
+
+  override protected def buildSparkSession(): SparkSession = {
+    val context = SparkContext.getActive match {
+      case None => SparkContext.getOrCreate(new SparkConf)
+      case Some(sc) => sc
+    }
+    new SnappySession(context)
+  }
+}

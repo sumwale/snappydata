@@ -17,7 +17,12 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.execution.ExchangeCoordinatorSuite
-import org.apache.spark.sql.test.{SharedSnappySessionContext, SnappySparkTestUtil}
+import org.apache.spark.sql.test.SnappySparkTestUtil
+import org.apache.spark.{SparkConf, SparkContext}
 
-class SnappyExchangeCoordinatorSuite extends ExchangeCoordinatorSuite
-    with SharedSnappySessionContext with SnappySparkTestUtil
+class SnappyExchangeCoordinatorSuite extends ExchangeCoordinatorSuite with SnappySparkTestUtil {
+
+  override protected def buildSparkSession(sparkConf: SparkConf): SparkSession = {
+    new SnappySession(SparkContext.getOrCreate(sparkConf))
+  }
+}

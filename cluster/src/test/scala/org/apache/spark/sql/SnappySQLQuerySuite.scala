@@ -512,7 +512,7 @@ class SnappySQLQuerySuite extends SnappyFunSuite {
       case f: FilterExec => assert(f.child.nodeName === "ColumnTableScan"); f
     }
     assert(filters.length === 2)
-    assert(filters.forall(!_.toString.contains("<")))
+    assert(filters.forall(!_.toString.contains("<")), filters)
     // check all filters should be in HashJoin
     joins = ds.queryExecution.executedPlan.collect {
       case j: HashJoinExec => j

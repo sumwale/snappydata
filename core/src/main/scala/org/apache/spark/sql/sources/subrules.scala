@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.sources
 
-import io.snappydata.QueryHint._
+import io.snappydata.QueryHint
 
 import org.apache.spark.sql.SnappySession
 import org.apache.spark.sql.catalyst.expressions._
@@ -80,9 +80,9 @@ object JoinOrderStrategy {
   )
 
   def getJoinOrderHints(implicit snappySession: SnappySession): Seq[JoinOrderStrategy] = {
-    snappySession.queryHints.get(JoinOrder) match {
-      case null => defaultSeq
-      case hints =>
+    snappySession.getLastQueryHint(QueryHint.JoinOrder) match {
+      case None => defaultSeq
+      case Some(hints) =>
         parse(hints.split(",")) ++
             Some(ApplyRest) // alert!! must be last rule and shouldn't be skipped.
     }
@@ -185,7 +185,7 @@ case object NonColocated extends JoinOrderStrategy {
       // handling any of it because Spark is getting a CBO as we speak and we might have to redo
       // this logic anyway.
       val nonColocated = partial.partitioned.filter(p =>
-        !partial.currentColocatedGroup.chain.exists(_ != p))
+        !partial.currentColocatedGroup.chain.exists(_.table != p))
 
       (nonColocated /: partial) { case a => RuleUtils.applyDefaultAction(a, withFilters) }
     } else {

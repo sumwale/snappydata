@@ -41,7 +41,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeRef
 import org.apache.spark.sql.catalyst.json.JSONOptions
 import org.apache.spark.sql.catalyst.optimizer.Optimizer
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, Partitioning, UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, HashPartitioning, Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, SQLBuilder, TableIdentifier}
 import org.apache.spark.sql.execution._
@@ -63,6 +63,7 @@ import org.apache.spark.status.api.v1.RDDStorageInfo
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.SnappyStreamingContext
 import org.apache.spark.streaming.dstream.DStream
+import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.Utils
 import org.apache.spark.{SparkConf, SparkContext, SparkException}
 
@@ -166,7 +167,12 @@ class Spark21Internals(override val version: String) extends SparkInternals {
 
   override def newCaseInsensitiveMap(map: Map[String, String]): Map[String, String] = {
     // versions >= 2.1.2 use CaseInsensitiveMap.apply() so use reflection here
-    caseInsensitiveMapCons.newInstance(map).asInstanceOf[Map[String, String]]
+    if (map.isEmpty || map.getClass.getName.contains("CaseInsensitiveMap")) map
+    else caseInsensitiveMapCons.newInstance(map).asInstanceOf[Map[String, String]]
+  }
+
+  override def detachHandler(ui: SparkUI, path: String): Unit = {
+    ui.removeStaticHandler(path)
   }
 
   def createAndAttachSQLListener(sparkContext: SparkContext): Unit = {
@@ -745,6 +751,11 @@ class Spark21Internals(override val version: String) extends SparkInternals {
   override def newHashClusteredDistribution(expressions: Seq[Expression],
       requiredNumPartitions: Option[Int]): Distribution = {
     ClusteredDistribution(expressions, requiredNumPartitions)
+  }
+
+  override def newClusteredPartitioning(distribution: Distribution,
+      numPartitions: Int): Partitioning = {
+    HashPartitioning(distribution.asInstanceOf[ClusteredDistribution].clustering, numPartitions)
   }
 }
 

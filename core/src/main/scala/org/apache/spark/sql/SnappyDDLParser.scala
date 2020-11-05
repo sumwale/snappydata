@@ -19,8 +19,6 @@ package org.apache.spark.sql
 
 import java.io.File
 
-import scala.util.Try
-
 import com.pivotal.gemfirexd.internal.iapi.util.IdUtil
 import io.snappydata.sql.catalog.{CatalogObjectType, SnappyExternalCatalog}
 import io.snappydata.{Constant, QueryHint}
@@ -345,7 +343,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
           } else synchronized {
             // parse the schema string expecting Spark SQL format
             val colParser = newInstance()
-            colParser.parseSQL(schemaString, colParser.tableSchemaOpt.run())
+            colParser.parseSQLOnly(schemaString, colParser.tableSchemaOpt.run())
                 .map(StructType(_)) -> None
           }
         } else None -> None
@@ -869,7 +867,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
             ((extendedOrFormatted: Any, tableIdent: TableIdentifier,
                 spec: Map[String, Option[String]]) => {
               // ensure columns are sent back as CLOB for large results with EXTENDED
-              queryHints.put(QueryHint.ColumnsAsClob.toString, "data_type,comment")
+              allHints += QueryHint.ColumnsAsClob.name -> "data_type,comment"
               val (isExtended, isFormatted) = extendedOrFormatted match {
                 case None => (false, false)
                 case Some(true) => (true, false)
@@ -1003,7 +1001,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   }
 
   final def tableSchemaOpt: Rule1[Option[Seq[StructField]]] = rule {
-    (tableSchema ~> (Some(_)) | ws ~> (() => None)).named("tableSchema") ~ EOI
+    (ws ~ tableSchema ~> (Some(_)) | ws ~> (() => None)).named("tableSchema") ~ EOI
   }
 
   protected final def optionKey: Rule1[String] = rule {
@@ -1031,9 +1029,6 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   protected def partitionSpec: Rule1[Map[String, Option[String]]]
   protected def query: Rule1[LogicalPlan]
   protected def expression: Rule1[Expression]
-  protected def parseSQL[T](sqlText: String, parseRule: => Try[T]): T
-
-  protected def newInstance(): SnappyDDLParser
 }
 
 case class DMLExternalTable(child: LogicalPlan, command: String) extends UnaryNode {

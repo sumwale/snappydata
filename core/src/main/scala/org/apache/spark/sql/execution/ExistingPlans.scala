@@ -29,8 +29,9 @@ import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.collection.Utils
-import org.apache.spark.sql.execution.columnar.ConnectionType
 import org.apache.spark.sql.execution.columnar.impl.{BaseColumnFormatRelation, ColumnarStorePartitionedRDD, IndexColumnFormatRelation, SmartConnectorColumnRDD}
+import org.apache.spark.sql.execution.columnar.{ColumnPutIntoExec, ConnectionType}
+import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetricInfo, SQLMetrics}
 import org.apache.spark.sql.execution.row.{RowFormatRelation, RowFormatScanRDD}
@@ -142,9 +143,6 @@ private[sql] abstract class PartitionedPhysicalScan(
 
 private[sql] object PartitionedPhysicalScan extends SparkSupport {
 
-  private[sql] val CT_BLOB_POSITION = 4
-  private val EMPTY_PARAMS = Array.empty[ParamLiteral]
-
   def createFromDataSource(
       output: Seq[Attribute],
       numBuckets: Int,
@@ -203,7 +201,8 @@ private[sql] object PartitionedPhysicalScan extends SparkSupport {
           r.sqlContext.conf.caseSensitiveAnalysis)
     }
 
-  def getSparkPlanInfo(fullPlan: SparkPlan, paramLiterals: Array[ParamLiteral] = EMPTY_PARAMS,
+  def getSparkPlanInfo(fullPlan: SparkPlan,
+      paramLiterals: Array[ParamLiteral] = SnappySession.EMPTY_PARAMS,
       paramsId: Int = -1): SparkPlanInfo = {
     val plan = fullPlan match {
       case CodegenSparkFallback(child, _) => child
@@ -244,8 +243,8 @@ private[sql] object PartitionedPhysicalScan extends SparkSupport {
  * A wrapper plan to immediately execute the child plan without having to do
  * an explicit collect. Only use for plans returning small results.
  */
-case class ExecutePlan(child: SparkPlan, preAction: () => Unit = () => ())
-    extends UnaryExecNode {
+case class ExecutePlan(relation: LogicalRelation,
+    child: SparkPlan, preAction: () => Unit = () => ()) extends UnaryExecNode {
 
   override def output: Seq[Attribute] = child.output
 
@@ -271,8 +270,8 @@ case class ExecutePlan(child: SparkPlan, preAction: () => Unit = () => ())
           (callSite.shortForm, callSite.longForm, treeString(verbose = true),
               PartitionedPhysicalScan.getSparkPlanInfo(this))
         } else {
-          val paramLiterals = key.currentLiterals
-          val paramsId = key.currentParamsId
+          val paramLiterals = key.paramLiterals
+          val paramsId = key.paramsId
           (key.sqlText, key.sqlText, SnappySession.replaceParamLiterals(
             treeString(verbose = true), paramLiterals, paramsId), PartitionedPhysicalScan
               .getSparkPlanInfo(this, paramLiterals, paramsId))
@@ -296,9 +295,17 @@ case class ExecutePlan(child: SparkPlan, preAction: () => Unit = () => ())
           case None =>
         }
       }
+
+      child match {
+        case _: TableExec | _: ColumnPutIntoExec =>
+          // Re-cache all cached plans (including this relation itself, if it's cached)
+          // that refer to this data source relation.
+          session.sharedState.cacheManager.recacheByPlan(session, relation)
+        case _ =>
+      }
+
       result
-    }
-    finally {
+    } finally {
       logDebug(s" Unlocking the table in execute of ExecutePlan:" +
           s" ${child.treeString(verbose = false)}")
       session.clearWriteLockOnTable()

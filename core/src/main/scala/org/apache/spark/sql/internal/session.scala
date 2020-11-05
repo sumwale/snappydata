@@ -33,7 +33,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.internal.config.{ConfigBuilder, ConfigEntry, TypedConfigBuilder}
 import org.apache.spark.sql.catalyst.analysis
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedAttribute, UnresolvedRelation, UnresolvedTableValuedFunction}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Cast, Contains, EndsWith, EqualTo, Expression, Like, Literal, NamedExpression, StartsWith}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Cast, Contains, EndsWith, EqualTo, Expression, Like, Literal, NamedExpression, StartsWith, TokenLiteral}
 import org.apache.spark.sql.catalyst.optimizer.ReorderJoin
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoTable, LogicalPlan, Project, UnaryNode, Filter => LogicalFilter}
@@ -155,15 +155,12 @@ class SnappyConf(@transient val session: SnappySession)
       key
 
     case Property.PlanCaching.name =>
-      value match {
-        case Some(boolVal) =>
-          val b = boolVal.toString.toBoolean
-          if (b) {
-            session.clearPlanCache()
-          }
-          session.planCaching = b
-        case None => session.planCaching = Property.PlanCaching.defaultValue.get
+      val b = value match {
+        case Some(boolVal) => boolVal.toString.toBoolean
+        case None => Property.PlanCaching.defaultValue.get
       }
+      if (!b && session.planCaching) session.clearPlanCache()
+      session.planCaching = b
       key
 
     case Property.DisableHashJoin.name =>
@@ -188,13 +185,13 @@ class SnappyConf(@transient val session: SnappySession)
       session.enableHiveSupport = newValue
       key
 
-    case Property.HiveCompatibility.name =>
+    case Property.Compatibility.name =>
       value match {
         case Some(level) => Utils.toLowerCase(level.toString) match {
-          case "snappy" | "spark" | "full" =>
+          case "snappy" | "spark" | "hive" =>
           case _ => throw new IllegalArgumentException(
-            s"Unexpected value '$level' for ${Property.HiveCompatibility.name}. " +
-                "Allowed values are: snappy, spark and full")
+            s"Unexpected value '$level' for ${Property.Compatibility.name}. " +
+                "Allowed values are: snappy, spark and hive")
         }
         case None =>
       }
@@ -929,8 +926,8 @@ private[sql] object ResolveInsertIntoPlan extends Rule[LogicalPlan] with SparkSu
 object LikeEscapeSimplification extends SparkSupport {
 
   private def addTokenizedLiteral(parser: SnappyParser, s: String): Expression = {
-    if (parser ne null) parser.addCachedLiteral(UTF8String.fromString(s), StringType)
-    else Literal(UTF8String.fromString(s), StringType)
+    if (parser ne null) parser.newCachedLiteral(UTF8String.fromString(s), StringType)
+    else new TokenLiteral(UTF8String.fromString(s), StringType)
   }
 
   def simplifyLike(parser: SnappyParser, expr: Expression,

@@ -277,6 +277,7 @@ class SetIsolationDUnitTest (val s: String)
     assert(rs2.next())
     assert(rs2.getString(3).equals("value11"))
     conn.close()
+    Thread.sleep(1000000)
   }
 
   private def doTestCommitWithConflicts(netPort1: Int, conn: Connection, isolationLevel: Int) = {

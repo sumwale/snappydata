@@ -73,7 +73,7 @@ case class JdbcExecute(session: SparkSession) extends DataFrameReader(session) {
       properties: SMap[String, String], initCredentials: Boolean): DataFrame = {
     option(JDBCOptions.JDBC_URL, getURL(host, port))
     option(JDBCOptions.JDBC_DRIVER_CLASS, Constant.JDBC_CLIENT_POOL_DRIVER)
-    option(JDBCOptions.JDBC_TABLE_NAME, s"($sql) queryTable")
+    option(JDBCOptions.JDBC_TABLE_NAME, s"($sql) as ${Constant.SNAPPY_INTERNAL_QUERY_ALIAS}")
     val props = if (initCredentials) {
       JdbcExtendedUtils.fillUserPassword(properties, session)
     } else properties

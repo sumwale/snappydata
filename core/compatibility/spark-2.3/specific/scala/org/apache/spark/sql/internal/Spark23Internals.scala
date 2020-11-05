@@ -40,6 +40,7 @@ import org.apache.spark.sql.execution.{CacheManager, SparkOptimizer, SparkPlan, 
 import org.apache.spark.sql.hive.{HiveSessionResourceLoader, SnappyAnalyzer, SnappyHiveExternalCatalog, SnappySessionState}
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.types.{DataType, Metadata, StructField, StructType}
+import org.apache.spark.ui.SparkUI
 import org.apache.spark.{SparkConf, SparkContext}
 
 /**
@@ -50,6 +51,10 @@ class Spark23Internals(override val version: String) extends Spark23_4_Internals
   override def uncacheQuery(spark: SparkSession, plan: LogicalPlan,
       cascade: Boolean, blocking: Boolean): Unit = {
     spark.sharedState.cacheManager.uncacheQuery(spark, plan, blocking)
+  }
+
+  override def detachHandler(ui: SparkUI, path: String): Unit = {
+    ui.removeStaticHandler(path)
   }
 
   override def newSharedState(sparkContext: SparkContext): SnappySharedState = {

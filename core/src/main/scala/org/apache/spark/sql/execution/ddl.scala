@@ -340,10 +340,20 @@ case class SnappyCacheTableCommand(tableIdent: TableIdentifier, queryString: Str
         val memoryPlan = df.queryExecution.executedPlan.collectFirst {
           case plan: InMemoryTableScanExec => plan.relation
         }.get
-        val planInfo = PartitionedPhysicalScan.getSparkPlanInfo(cachedExecution.executedPlan)
+        var queryExecutionStr = cachedExecution.toString()
+        var planInfo: SparkPlanInfo = null
+        val key = session.currentKey
+        if (key ne null) {
+          queryExecutionStr = SnappySession.replaceParamLiterals(queryExecutionStr,
+            key.paramLiterals, key.paramsId)
+          planInfo = PartitionedPhysicalScan.getSparkPlanInfo(cachedExecution.executedPlan,
+            key.paramLiterals, key.paramsId)
+        } else {
+          planInfo = PartitionedPhysicalScan.getSparkPlanInfo(cachedExecution.executedPlan)
+        }
         Row(CachedDataFrame.withCallback(session, df = null, cachedExecution, "cache")(_ =>
           CachedDataFrame.withNewExecutionId(session, cachedExecution.executedPlan,
-            queryShortString, queryString, cachedExecution.toString(), planInfo)({
+            queryShortString, queryString, queryExecutionStr, planInfo)({
             val start = System.nanoTime()
             // Dummy op to materialize the cache. This does the minimal job of count on
             // the actual cached data (RDD[CachedBatch]) to force materialization of cache
@@ -371,8 +381,8 @@ class ShowSnappyTablesCommand(schemaOpt: Option[String], tablePattern: Option[St
     val hiveCompatible: Boolean) extends ShowTablesCommand(schemaOpt, tablePattern) {
 
   def this(schemaOpt: Option[String], tablePattern: Option[String], session: SnappySession) {
-    this(schemaOpt, tablePattern)(Property.HiveCompatibility.get(
-      session.sessionState.conf).equalsIgnoreCase("full"))
+    this(schemaOpt, tablePattern)(Property.Compatibility.get(
+      session.sessionState.conf).equalsIgnoreCase("hive"))
   }
 
   override val output: Seq[Attribute] = {
@@ -407,8 +417,8 @@ class ShowSnappyTablesCommand(schemaOpt: Option[String], tablePattern: Option[St
 case class ShowViewsCommand(session: SnappySession, schemaOpt: Option[String],
     viewPattern: Option[String]) extends RunnableCommand {
 
-  private val hiveCompatible = Property.HiveCompatibility.get(
-    session.sessionState.conf).equalsIgnoreCase("full")
+  private val hiveCompatible = Property.Compatibility.get(
+    session.sessionState.conf).equalsIgnoreCase("hive")
 
   // The result of SHOW VIEWS has four columns: schemaName, tableName, isTemporary and isGlobal.
   override val output: Seq[Attribute] = {

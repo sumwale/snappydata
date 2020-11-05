@@ -16,10 +16,8 @@
  */
 package org.apache.spark.sql
 
-import java.util.concurrent.ConcurrentHashMap
-
 import com.gemstone.gemfire.internal.shared.SystemProperties
-import io.snappydata.QueryHint
+import io.snappydata.{Constant, QueryHint}
 import org.eclipse.collections.impl.map.mutable.UnifiedMap
 import org.eclipse.collections.impl.set.mutable.UnifiedSet
 import org.parboiled2._
@@ -29,7 +27,7 @@ import org.apache.spark.sql.catalyst.parser.ParserUtils
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, IdentifierWithDatabase, TableIdentifier}
 import org.apache.spark.sql.collection.Utils
-import org.apache.spark.sql.collection.Utils.{toLowerCase => lower, toUpperCase => upper}
+import org.apache.spark.sql.collection.Utils.{toLowerCase => toLower, toUpperCase => toUpper}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{SnappyParserConsts => Consts}
 
@@ -37,6 +35,8 @@ import org.apache.spark.sql.{SnappyParserConsts => Consts}
  * Base parsing facilities for all SnappyData SQL parsers.
  */
 abstract class SnappyBaseParser extends Parser() {
+
+  type HintValue = (String, Seq[Expression])
 
   protected[sql] final var caseSensitive: Boolean = _
 
@@ -51,36 +51,38 @@ abstract class SnappyBaseParser extends Parser() {
   protected final var quotedFlags: Int = _
 
   /**
-   * Disable hints processing within comments. This is done for two cases:
-   * a) hints are plan level so they are explicitly processed to wrap the current LogicalPlan
-   * b) expression parsing within value of hint will disable it to avoid nested hints
+   * All of the query hints in the current statement parsing are tracked in this map.
    */
-  protected final var hintsEnabled: Boolean = true
+  protected final var allHints: Map[String, String] = Map.empty
 
-  private[sql] final val queryHints: ConcurrentHashMap[String, String] =
-    new ConcurrentHashMap[String, String](4, 0.7f, 1)
+  /**
+   * The query hints being tracked currently after being cleared by [[getAndClearCurrentHints]].
+   */
+  protected final var currentHints: Map[String, HintValue] = Map.empty
 
-  protected final def disableHints: Boolean = {
-    val v = hintsEnabled
-    hintsEnabled = false
-    v
+  protected final def getAndClearCurrentHints(): Map[String, HintValue] = {
+    val m = currentHints
+    currentHints = Map.empty
+    m
   }
 
-  protected final def hintStatement: Rule1[(String, String, Seq[Expression])] = rule {
-    // disable possible nested hint processing
-    push(disableHints) ~ identifier ~ capture((O_PAREN ~ (primaryExpression + commaSep) ~
-        C_PAREN).?) ~> { (enabled: Boolean, name: String, args: Any, value: String) =>
-      hintsEnabled = enabled
-      val stringValue = if (value.isEmpty) value else value.substring(1, value.length - 2).trim
+  protected final def hintStatement: Rule0 = rule {
+    identifier ~ capture((O_PAREN ~ (primaryExpression * commaSep) ~ ')').?) ~
+        Consts.whitespace.* ~> { (name: String, args: Any, value: String) =>
+      val stringValue = if (value.isEmpty) value else value.substring(1, value.length - 1).trim
       // put all hints into the queryHints map including plan-level hints (helps plan caching
       // to determine whether or not to re-use the LogicalPlan that does not have physical
       // plan information that planHints effect)
-      queryHints.put(name, stringValue)
+      allHints += name -> stringValue
       args.asInstanceOf[Option[Seq[Expression]]] match {
-        case None => (name, "", Nil)
-        case Some(s) => (name, stringValue, s)
+        case None => currentHints += name -> (stringValue -> Nil)
+        case Some(s) => currentHints += name -> (stringValue -> s)
       }
     }
+  }
+
+  protected final def hintStatements: Rule0 = rule {
+    Consts.whitespace.* ~ (hintStatement ~ (',' ~ Consts.whitespace.*).?).*
   }
 
   protected final def commentBody: Rule0 = rule {
@@ -88,12 +90,20 @@ abstract class SnappyBaseParser extends Parser() {
   }
 
   protected final def commentBodyOrHint: Rule0 = rule {
-    '+' ~ (hintStatement + commaSep) ~> (_ => ()) ~ commentBody |
+    '+' ~ hintStatements ~ commentBody |
     commentBody
   }
 
   protected final def lineCommentOrHint: Rule0 = rule {
-    '+' ~ (hintStatement + commaSep) ~> (_ => ()) ~ noneOf(Consts.lineCommentEnd).* |
+    // line comment has to end at newline, so cannot use hintStatement directly
+    // as it has primaryExpression inside that can consume the newline
+    '+' ~ capture(noneOf(Consts.lineCommentEnd).*) ~> { (comment: String) =>
+      val commentParser = newInstance()
+      // rest of comment after hints will be ignored since there is no EOI in hintStatements
+      commentParser.parseSQLOnly(comment, commentParser.hintStatements.run())
+      allHints ++= commentParser.allHints
+      currentHints ++= commentParser.currentHints
+    } |
     noneOf(Consts.lineCommentEnd).*
   }
 
@@ -101,10 +111,8 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def ws: Rule0 = rule {
     quiet(
       Consts.whitespace |
-      '-' ~ '-' ~ (test(hintsEnabled) ~ lineCommentOrHint |
-          test(!hintsEnabled) ~ !'+' ~ noneOf(Consts.lineCommentEnd).*) |
-      '/' ~ '*' ~ (test(hintsEnabled) ~ (commentBodyOrHint | fail("unclosed comment")) |
-          test(!hintsEnabled) ~ !'+' ~ (commentBody | fail("unclosed comment")))
+      '-' ~ '-' ~ lineCommentOrHint |
+      '/' ~ '*' ~ (commentBodyOrHint | fail("unclosed comment"))
     ).*
   }
 
@@ -147,6 +155,8 @@ abstract class SnappyBaseParser extends Parser() {
 
   protected def primaryExpression: Rule1[Expression]
 
+  protected def newInstance(): SnappyParser
+
   final def keyword(k: Keyword): Rule0 = rule {
     atomic(ignoreCase(k.lower)) ~ delimiter
   }
@@ -174,7 +184,7 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def unreservedIdentifier: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     unquotedIdentifier ~> { (s: String) =>
-      val lcase = lower(s)
+      val lcase = toLower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
     }
@@ -195,6 +205,12 @@ abstract class SnappyBaseParser extends Parser() {
     unreservedIdentifier | quotedIdentifier
   }
 
+  /**
+   * Identifier with internal [[quotedFlags]] set to a bitmask indicating whether
+   * the previous set of identifiers is quoted (mask of 1) or unquoted (mask of 0).
+   * This is used at higher layer parser to interpret quoted identifiers as regular
+   * expressions if the appropriate flag is set in SQLConf.
+   */
   protected final def identifierWithQuotedFlag: Rule1[String] = rule {
     unreservedIdentifier ~> (() => quotedFlags = quotedFlags << 1) |
     quotedIdentifier ~> (() => quotedFlags = (quotedFlags << 1) | 0x1)
@@ -208,7 +224,7 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def strictIdentifier: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     unquotedIdentifier ~> { (s: String) =>
-      val lcase = lower(s)
+      val lcase = toLower(s)
       test(!Consts.allKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
     } |
@@ -218,8 +234,9 @@ abstract class SnappyBaseParser extends Parser() {
   private def quoteIdentifier(name: String): String = name.replace("`", "``")
 
   protected final def quotedUppercaseId(id: IdentifierWithDatabase): String = id.database match {
-    case None => s"`${upper(quoteIdentifier(id.identifier))}`"
-    case Some(d) => s"`${upper(quoteIdentifier(d))}`.`${upper(quoteIdentifier(id.identifier))}`"
+    case None => s"`${toUpper(quoteIdentifier(id.identifier))}`"
+    case Some(d) =>
+      s"`${toUpper(quoteIdentifier(d))}`.`${toUpper(quoteIdentifier(id.identifier))}`"
   }
 
   protected final def O_PAREN: Rule0 = rule {
@@ -337,7 +354,7 @@ abstract class SnappyBaseParser extends Parser() {
     // noinspection ScalaUnnecessaryParentheses
     atomic(capture(CharPredicate.Digit.* ~ Consts.identStart ~ Consts.identifier.*)) ~
         delimiter ~> { (s: String) =>
-      val lcase = lower(s)
+      val lcase = toLower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
     } |
@@ -348,14 +365,14 @@ abstract class SnappyBaseParser extends Parser() {
   protected final def identifierExt2: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     atomic(capture(CharPredicate.Digit.* ~ Consts.identStart ~ Consts.identifier.*)) ~ delimiter ~>
-        ((s: String) => if (caseSensitive) s else lower(s)) |
+        ((s: String) => if (caseSensitive) s else toLower(s)) |
     quotedIdentifier
   }
 
   protected final def packageIdentifierPart: Rule1[String] = rule {
     // noinspection ScalaUnnecessaryParentheses
     atomic(capture(Consts.packageIdentifier. +)) ~ ws ~> { (s: String) =>
-      val lcase = lower(s)
+      val lcase = toLower(s)
       test(!Consts.reservedKeywords.contains(lcase)) ~
           push(if (caseSensitive) s else lcase)
     } |
@@ -382,7 +399,7 @@ abstract class SnappyBaseParser extends Parser() {
 }
 
 final class Keyword private[sql](s: String) {
-  val lower: String = Utils.toLowerCase(s)
+  val lower: String = toLower(s)
 
   override def hashCode(): Int = lower.hashCode
 
@@ -540,9 +557,10 @@ object SnappyParserConsts {
   final val WHERE: Keyword = reservedKeyword("where")
   final val WITH: Keyword = reservedKeyword("with")
 
-  // marked as internal keywords as reserved to prevent use in SQL
+  // marked internal keywords as reserved to prevent use in SQL
   final val HIVE_METASTORE: Keyword = reservedKeyword(SystemProperties.SNAPPY_HIVE_METASTORE)
   final val SAMPLER_WEIGHTAGE: Keyword = reservedKeyword(Utils.WEIGHTAGE_COLUMN_NAME)
+  final val INTERNAL_QUERY_ALIAS: Keyword = nonReserved(Constant.SNAPPY_INTERNAL_QUERY_ALIAS)
 
   // non-reserved keywords that can be freely used in alias names
   final val ADD: Keyword = nonReserved("add")
@@ -645,7 +663,7 @@ object SnappyParserConsts {
   final val PACKAGE: Keyword = nonReserved("package", isKeyword = false)
   final val PACKAGES: Keyword = nonReserved("packages", isKeyword = false)
   final val PATH: Keyword = nonReserved("path", isKeyword = false)
-  final val PARTITION: Keyword = nonReserved("partition", isKeyword = false)
+  final val PARTITION: Keyword = nonReserved("partition")
   final val PARTITIONED: Keyword = nonReserved("partitioned", isKeyword = false)
   final val PERCENT: Keyword = nonReserved("percent", isKeyword = false)
   final val PIVOT: Keyword = nonReserved("pivot")
