@@ -175,7 +175,7 @@ class LeaderLauncherSpec extends WordSpec with Matchers {
       val replaceString = "<dir>"
       " have jobserver tmp directory redirected " in {
         val l = new LeadImpl
-        val conf = l.getConfig(Array.empty)
+        val conf = l.getConfig
         val f = conf.getString("spark.jobserver.filedao.rootdir")
         assert(f.indexOf(replaceString) == -1)
         assert(f === "./spark-jobserver/filedao/data")
@@ -192,7 +192,7 @@ class LeaderLauncherSpec extends WordSpec with Matchers {
         System.setProperty(
           com.pivotal.gemfirexd.internal.iapi.reference.Property.SYSTEM_HOME_PROPERTY, directory)
         val l = new LeadImpl
-        val conf = l.getConfig(Array.empty)
+        val conf = l.getConfig
         val f = conf.getString("spark.jobserver.filedao.rootdir")
         assert(f.indexOf(replaceString) == -1)
         assert(f startsWith directory)

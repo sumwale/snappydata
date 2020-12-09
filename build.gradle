@@ -43,7 +43,7 @@ def isEnterpriseProduct = rootProject.hasProperty('snappydata.enterprise')
 def compatibilityMap = [
   '2.1.1': '2.1', '2.1.2': '2.1', '2.1.3': '2.1',
   '2.3.0': '2.3', '2.3.1': '2.3', '2.3.2': '2.3', '2.3.3': '2.3', '2.3.4': '2.3',
-  '2.4.0': '2.4', '2.4.1': '2.4', '2.4.2': '2.4', '2.4.3': '2.4', '2.4.4': '2.4', '2.4.5': '2.4', '2.4.6': '2.4.6'
+  '2.4.0': '2.4', '2.4.1': '2.4', '2.4.2': '2.4', '2.4.3': '2.4', '2.4.4': '2.4', '2.4.5': '2.4', '2.4.6': '2.4', '2.4.7': '2.4.7'
 ]
 
 allprojects {
@@ -77,7 +77,7 @@ allprojects {
   apply plugin: "build-time-tracker"
 
   group = 'io.snappydata'
-  version = '1.1.1'
+  version = '1.3.0-SNAPSHOT'
 
   // apply compiler options
   tasks.withType(JavaCompile) {
@@ -114,9 +114,9 @@ allprojects {
     scalaBinaryVersion = '2.11'
     scalaVersion = scalaBinaryVersion + '.12'
 
-    sparkVersion = '2.4.6'
+    sparkVersion = '2.4.7'
     sparkConnectorVersion = System.getProperty('spark.connector.version', sparkVersion)
-    snappySparkVersion = '2.4.6.1'
+    snappySparkVersion = '2.4.7.1'
     coreProjectName = sparkVersion == sparkConnectorVersion
         ? ":snappy-core_${scalaBinaryVersion}" : ":snappy-core-product_${scalaBinaryVersion}"
     compatProjectName = ":snappy-core_${scalaBinaryVersion}:compat-spark${compatibilityMap[sparkVersion]}"
@@ -132,6 +132,9 @@ allprojects {
     junitVersion = '4.12'
     mockitoVersion = '1.10.19'
     hadoopVersion = '2.7.7'
+    gcsHadoop2ConnectorVersion = 'hadoop2-2.0.0'
+    gcsHadoop3ConnectorVersion = 'hadoop3-2.0.0'
+    sparkXmlVersion = '0.10.0'
     scalatestVersion = '3.0.8'
     jettyVersion = '9.3.28.v20191105'
     guavaVersion = '14.0.1'
@@ -168,7 +171,7 @@ allprojects {
     kafka2Version = '2.0.1'
 
     pegdownVersion = '1.6.0'
-    snappyStoreVersion = '1.6.4'
+    snappyStoreVersion = '1.6.5'
     snappydataVersion = version
     pulseVersion = '1.5.1'
     zeppelinInterpreterVersion = '0.7.3.6'
@@ -180,6 +183,14 @@ allprojects {
     osFamilyName = osName.getFamilyName().replace(' ', '').toLowerCase()
     osVersion = System.getProperty('os.version')
     buildDate = new Date().format('yyyy-MM-dd HH:mm:ss Z')
+    buildDateShort = ''
+    if (rootProject.hasProperty('withDate')) {
+      buildDateShort = "${new Date().format('yyyyMMdd')}_"
+    }
+    devEdition = ''
+    if (rootProject.hasProperty('dev')) {
+      devEdition = "-dev"
+    }
     buildNumber = new Date().format('MMddyy')
     jdkVersion = System.getProperty('java.version')
     clusterType = ''
@@ -187,6 +198,7 @@ allprojects {
     sparkJobServerVersion = '0.9.0.1'
     eclipseCollectionsVersion = '10.1.0'
     fastutilVersion = '8.3.1'
+    snappySparkMetricsLibVersion = '2.0.0.1'
 
     gitCmd = "git --git-dir=${rootDir}/.git --work-tree=${rootDir}"
     gitBranch = "${gitCmd} rev-parse --abbrev-ref HEAD".execute().text.trim()
@@ -342,6 +354,11 @@ task cleanScalaTest { doLast {
 } }
 task cleanJUnit { doLast {
   String workingDir = "${testResultsBase}/junit"
+  delete workingDir
+  file(workingDir).mkdirs()
+} }
+task cleanRecoveryTest { doLast {
+  String workingDir = "${testResultsBase}/recoveryTest"
   delete workingDir
   file(workingDir).mkdirs()
 } }
@@ -526,6 +543,62 @@ subprojects {
     }
   }
 
+  task recoveryTest(type: Test) {
+    dependsOn ':cleanRecoveryTest'
+    dependsOn ':product'
+    dependsOn ':copyShadowJars'
+
+    maxParallelForks = 1
+    minHeapSize '4g'
+    maxHeapSize '4g'
+
+    // limit netty buffer arenas to avoid occasional OOMEs with 1.5g heap
+    int numArenas = Math.min(8, Runtime.getRuntime().availableProcessors())
+    jvmArgs = ['-XX:+HeapDumpOnOutOfMemoryError',
+               '-XX:+UseParNewGC', '-XX:+UseConcMarkSweepGC',
+               '-XX:CMSInitiatingOccupancyFraction=50',
+               '-XX:+CMSClassUnloadingEnabled', '-ea',
+               '-Dspark.sql.codegen.cacheSize=1000',
+               '-Dspark.ui.retainedStages=500',
+               '-Dspark.ui.retainedJobs=500',
+               '-Dspark.sql.ui.retainedExecutions=500',
+               '-Dio.netty.allocator.pageSize=8192',
+               '-Dio.netty.allocator.maxOrder=10',
+               "-Dio.netty.allocator.numHeapArenas=${numArenas}",
+               "-Dio.netty.allocator.numDirectArenas=${numArenas}"]
+
+    workingDir = "${testResultsBase}/recoveryTest"
+    systemProperties 'java.net.preferIPv4Stack': 'true',
+        'SNAPPY_HOME': snappyProductDir,
+        'RECOVERY_TEST_DIR': workingDir
+
+    binResultsDir = file("${workingDir}/binary/${project.name}")
+    reports.html.destination = file("${workingDir}/html/${project.name}")
+    reports.junitXml.destination = file(workingDir)
+
+    int numTestClasses = 0
+    def testCount = new java.util.concurrent.atomic.AtomicInteger(0)
+
+    doFirst {
+      String eol = System.getProperty('line.separator')
+      String now = new Date().format('yyyy-MM-dd HH:mm:ss.SSS Z')
+      def progress = new File(workingDir, 'progress.txt')
+      numTestClasses = getCandidateClassFiles().getFiles().size()
+      progress << "${eol}${now} ========== STARTING RECOVERY TEST SUITE FOR ${project.name} ==========${eol}${eol}"
+    }
+    beforeSuite { desc ->
+      if (desc.className != null) {
+        def count = testCount.incrementAndGet()
+        println "${now()} Start ${desc.className} ($count/$numTestClasses)"
+      }
+    }
+    afterSuite { desc, result ->
+      if (desc.className != null) {
+        println "${now()} END ${desc.className}"
+      }
+    }
+  }
+
   task dunitSecurityTest(type: Test) {
     dependsOn ':cleanSecurityDUnit'
     dependsOn ':product'
@@ -568,7 +641,7 @@ subprojects {
 
   // apply default manifest
   if (rootProject.hasProperty('enablePublish')) {
-    createdBy = 'TIBCO Software Inc.'
+    createdBy = vendorName
   }
   jar {
     manifest {
@@ -724,7 +797,11 @@ gradle.taskGraph.whenReady { graph ->
     dunitSecSingle = rootProject.hasProperty('dunitSecurity.single') ?
         rootProject.property('dunitSecurity.single') : null
   }
-
+  String recoverySingle = System.getProperty('recovery.single')
+  if (recoverySingle == null || recoverySingle.length() == 0) {
+    recoverySingle = rootProject.hasProperty('recovery.single') ?
+        rootProject.property('recovery.single') : null
+  }
   def allTasks = subprojects.collect { it.tasks }.flatten()
   allTasks.each { task ->
     if (task instanceof Tar) {
@@ -748,7 +825,8 @@ gradle.taskGraph.whenReady { graph ->
               includes = [ '**/*DUnitTest.class', '**/*DUnit.class' ]
               excludes = [ '**/*Suite.class', '**/*DUnitSecurityTest.class', '**/NCJ*DUnit.class', '**/*HDFS*DUnit*.class',
                   '**/BackwardCompatabilityPart*DUnit.class', '**/*Perf*DUnit.class', '**/ListAggDUnit.class',
-                  '**/SingleHop*TransactionDUnit.class', '**/*Parallel*AsyncEvent*DUnit.class', '**/pivotal/gemfirexd/wan/**/*DUnit.class' ]
+                  '**/SingleHop*TransactionDUnit.class', '**/*Parallel*AsyncEvent*DUnit.class',
+                           '**/pivotal/gemfirexd/wan/**/*DUnit.class', '**/*DUnitRecoveryTest.class' ]
             }
             FileTree includeTestFiles = dunitTests
             int dunitFrom = rootProject.hasProperty('dunit.from') ?
@@ -773,7 +851,7 @@ gradle.taskGraph.whenReady { graph ->
           if (dunitSecSingle == null || dunitSecSingle.length() == 0) {
             def dunitSecurityTests = testClassesDirs.asFileTree.matching {
               includes = [ '**/*DUnitSecurityTest.class' ]
-              excludes = [ '**/*Suite.class', '**/*DUnitTest.class', '**/*DUnit.class' ]
+              excludes = [ '**/*Suite.class', '**/*DUnitTest.class', '**/*DUnit.class', '**/*DUnitRecoveryTest.class' ]
             }
             FileTree includeTestFiles = dunitSecurityTests
             int dunitFrom = rootProject.hasProperty('dunitSecurity.from') ?
@@ -791,6 +869,23 @@ gradle.taskGraph.whenReady { graph ->
             include filteredSet
           } else {
             include dunitSecSingle
+          }
+        } else if (test.name == 'recoveryTest') {
+          includes.clear()
+          excludes.clear()
+          if (!rootProject.hasProperty('snappydata.enterprise')) {
+            excludes = [ '**/*Suite.class', '**/*DUnitSecurityTest.class', '**/*DUnitTest.class', '**/*DUnit.class' ]
+          } else if (recoverySingle == null || recoverySingle.length() == 0) {
+            def recoveryTests = testClassesDirs.asFileTree.matching {
+              includes = [ '**/*DUnitRecoveryTest.class' ]
+              excludes = [ '**/*Suite.class', '**/*DUnitSecurityTest.class', '**/NCJ*DUnit.class', '**/*HDFS*DUnit*.class',
+                           '**/BackwardCompatabilityPart*DUnit.class', '**/*Perf*DUnit.class', '**/ListAggDUnit.class',
+                           '**/SingleHop*TransactionDUnit.class', '**/*Parallel*AsyncEvent*DUnit.class', '**/pivotal/gemfirexd/wan/**/*DUnit.class', '**/*Suite.class', '**/*DUnitTest.class', '**/*DUnit.class' ]
+            }
+            FileTree includeTestFiles = recoveryTests
+            include includeTestFiles.collect {f -> "**/" + f.name}
+          } else {
+            include recoverySingle
           }
         }
 
@@ -1049,6 +1144,11 @@ task product(type: Zip) {
           into "${snappyProductDir}/connectors"
           include "*.jar"
         }
+        copy {
+          from "${jdbcConnectorProject.projectDir}/../tdv-connector/lib"
+          into "${snappyProductDir}/jars"
+          include "csjdbc8.jar"
+        }
       }
       if (hasGemFireConnectorProject) {
         copy {
@@ -1191,7 +1291,6 @@ ospackage {
 }
 
 buildRpm {
-  dependsOn ':packageVSD'
   if (rootProject.hasProperty('enablePublish')) {
     dependsOn ':packageZeppelinInterpreter'
   }
@@ -1207,7 +1306,6 @@ buildRpm {
 }
 
 buildDeb {
-  dependsOn ':packageVSD'
   if (rootProject.hasProperty('enablePublish')) {
     dependsOn ':packageZeppelinInterpreter'
   }
@@ -1225,7 +1323,7 @@ buildDeb {
 
 distTar {
   if (isEnterpriseProduct) {
-    archiveName = 'TIB_compute_' + version + '_' + osFamilyName + '.tar.gz'
+    archiveName = 'TIB_compute' + devEdition + '_' + version + '_' + buildDateShort + osFamilyName + '.tar.gz'
   } else {
     archiveName = 'snappydata_' + version + '_' + osFamilyName + '.tar.gz'
   }
@@ -1244,7 +1342,7 @@ distTar {
 
 distZip {
   if (isEnterpriseProduct) {
-    archiveName = 'TIB_compute_' + version + '_' + osFamilyName + '.zip'
+    archiveName = 'TIB_compute' + devEdition + '_' + version + '_' + buildDateShort + osFamilyName + '.zip'
   } else {
     archiveName = 'snappydata_' + version + '_' + osFamilyName + '.zip'
   }
@@ -1265,11 +1363,15 @@ assemble.dependsOn product, distTar
 
 task distRpm {
   dependsOn product
+  // also package VSD
+  dependsOn ':packageVSD'
   dependsOn buildRpm
 }
 
 task distDeb {
   dependsOn product
+  // also package VSD
+  dependsOn ':packageVSD'
   dependsOn buildDeb
 }
 
@@ -1313,6 +1415,8 @@ task copyShadowJars {
 
 task distInstallers {
   dependsOn product
+  // also package VSD
+  dependsOn ':packageVSD'
   dependsOn buildRpm
   dependsOn buildDeb
 }
@@ -1380,7 +1484,9 @@ task checkAll {
   if (rootProject.hasProperty('spark')) {
     dependsOn ':snappy-spark:check'
   }
-  dependsOn ":snappy-cluster_${scalaBinaryVersion}:check"
+  if (!rootProject.hasProperty('cluster.skip')) {
+    dependsOn ":snappy-cluster_${scalaBinaryVersion}:check"
+  }
   dependsOn ":snappy-examples_${scalaBinaryVersion}:check"
   if (!rootProject.hasProperty('aqp.skip') && hasAqpProject && isEnterpriseProduct) {
     dependsOn ":snappy-aqp_${scalaBinaryVersion}:check"
@@ -1544,7 +1650,6 @@ task sparkPackage {
 }
 
 packagePulse.mustRunAfter product
-packageVSD.mustRunAfter product
 packageZeppelinInterpreter.mustRunAfter product
 
 distTar.mustRunAfter clean, cleanAll, product

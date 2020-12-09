@@ -39,7 +39,7 @@ case class RowInsertExec(child: SparkPlan, putInto: Boolean,
 
   override protected def doProduce(ctx: CodegenContext): String = {
     val rowInsertStr = JdbcExtendedUtils.getInsertOrPutString(resolvedName,
-      tableSchema, putInto, escapeQuotes = true)
+      tableSchema, putInto)
     super.doProduce(ctx, rowInsertStr)
   }
 

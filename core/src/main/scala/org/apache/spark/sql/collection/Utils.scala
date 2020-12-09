@@ -34,6 +34,7 @@ import com.esotericsoftware.kryo.io.{Input, Output}
 import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 import com.gemstone.gemfire.internal.cache.PartitionedRegion
 import com.pivotal.gemfirexd.Attribute.{PASSWORD_ATTR, USERNAME_ATTR}
+import com.pivotal.gemfirexd.Constants
 import com.pivotal.gemfirexd.internal.engine.Misc
 import com.pivotal.gemfirexd.internal.engine.jdbc.GemFireXDRuntimeException
 import io.snappydata.Constant.{SPARK_STORE_PREFIX, STORE_PROPERTY_PREFIX}
@@ -68,7 +69,7 @@ import org.apache.spark.util.AccumulatorV2
 import org.apache.spark.util.collection.BitSet
 import org.apache.spark.util.io.ChunkedByteBuffer
 
-object Utils extends Logging with SparkSupport {
+object Utils extends SparkSupport with Logging {
 
   final val EMPTY_STRING_ARRAY = SharedUtils.EMPTY_STRING_ARRAY
   final val WEIGHTAGE_COLUMN_NAME = "snappy_sampler_weightage"
@@ -499,6 +500,45 @@ object Utils extends Logging with SparkSupport {
         .remove(Constant.CHAR_TYPE_SIZE_PROP).build()
   }
 
+  def modifySchemaIfNeeded(options: mutable.Map[String, String], session: SnappySession,
+      schema: StructType): StructType = options.remove(Constant.STRING_TYPE_AS) match {
+    case None => schema
+    case Some(stringTypeAs) =>
+      val parser = session.snappyParser.newInstance()
+      val stringAsDataType = parser.parseSQLOnly[DataType](stringTypeAs,
+        parser.columnDataType.run())
+      val (dataTypeStr, size) = stringAsDataType match {
+        case CharType(size) => "CHAR" -> size
+        case VarcharType(Int.MaxValue) => "CLOB" -> Int.MaxValue
+        case VarcharType(size) => "VARCHAR" -> size
+        case StringType => "STRING" -> -1
+      }
+
+      StructType(schema.map(f => f.dataType match {
+        case StringType =>
+          val oldMetadata = f.metadata
+          val builder = new MetadataBuilder()
+          if ((oldMetadata eq null) ||
+              !oldMetadata.contains(Constant.CHAR_TYPE_BASE_PROP) ||
+              /* oldMetadata.getString(Constant.CHAR_TYPE_BASE_PROP).
+                equalsIgnoreCase("CLOB")  || */
+              oldMetadata.getString(Constant.CHAR_TYPE_BASE_PROP).
+                  equalsIgnoreCase("STRING")) {
+            val newMetadata = if (oldMetadata eq null) {
+              builder.putString(Constant.CHAR_TYPE_BASE_PROP, dataTypeStr).
+                  putLong(Constant.CHAR_TYPE_SIZE_PROP, size)
+              builder.build()
+            } else {
+              builder.withMetadata(oldMetadata).
+                  putString(Constant.CHAR_TYPE_BASE_PROP, dataTypeStr).
+                  putLong(Constant.CHAR_TYPE_SIZE_PROP, size).build()
+            }
+            f.copy(metadata = newMetadata)
+          } else f
+        case _ => f
+      }))
+  }
+
   def schemaFields(schema: StructType): SMap[String, StructField] = {
     new CaseInsensitiveMutableHashMap[StructField](schema.fields.map(f => f.name -> f).toMap)
   }
@@ -569,6 +609,18 @@ object Utils extends Logging with SparkSupport {
 
   def setCurrentSchema(session: SnappySession, schema: String, createIfNotExists: Boolean): Unit =
     session.setCurrentSchema(schema, createIfNotExists)
+
+  def getDatabaseAuthorizationClause(properties: Map[String, String]): String = {
+    val authKey = SnappyParserConsts.AUTHORIZATION.lower
+    properties.get(authKey) match {
+      case None => ""
+      case Some(id) =>
+        val auth = Utils.toUpperCase(authKey)
+        val ldapKey = Constants.LDAP_GROUP_PREFIX
+        if (id.startsWith(ldapKey)) s"\n$auth $ldapKey `${id.substring(ldapKey.length)}`"
+        else s"\n$auth `$id`"
+    }
+  }
 
   def getLocalProperties(sc: SparkContext): java.util.Properties = sc.getLocalProperties
 

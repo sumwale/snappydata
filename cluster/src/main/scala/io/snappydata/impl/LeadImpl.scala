@@ -20,8 +20,9 @@ import java.lang.reflect.{Constructor, Method}
 import java.net.{URL, URLClassLoader}
 import java.security.Permission
 import java.sql.SQLException
-import java.util.Properties
+import java.util.{Properties, UUID}
 
+import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
@@ -44,6 +45,8 @@ import com.pivotal.gemfirexd.{Attribute, Constants, FabricService, NetworkInterf
 import com.typesafe.config.{Config, ConfigFactory}
 import io.snappydata.Constant.{SPARK_PREFIX, SPARK_SNAPPY_PREFIX, JOBSERVER_PROPERTY_PREFIX => JOBSERVER_PREFIX, PROPERTY_PREFIX => SNAPPY_PREFIX, STORE_PROPERTY_PREFIX => STORE_PREFIX}
 import io.snappydata.cluster.ExecutorInitiator
+import io.snappydata.metrics.SnappyMetricsSystem
+import io.snappydata.recovery.RecoveryService
 import io.snappydata.util.ServiceUtils
 import io.snappydata.{Constant, Lead, LocalizedMessages, Property, ProtocolOverrides, ServiceManager, SnappyTableStatsProviderService}
 import org.apache.thrift.transport.TTransportException
@@ -73,15 +76,25 @@ class LeadImpl extends ServerImpl with Lead
 
   @volatile private var servicesStarted: Boolean = _
 
-  var _directApiInvoked: Boolean = false
-  var isTestSetup = false
+  private var _directApiInvoked = false
+  private var isTestSetup = false
 
   def directApiInvoked: Boolean = _directApiInvoked
 
   private var remoteInterpreterServerClass: Class[_] = _
   private var remoteInterpreterServerObj: Any = _
 
-  var urlclassloader: ExtendibleURLClassLoader = _
+  @volatile private var _urlClassLoader: ExtendibleURLClassLoader = _
+
+  def urlClassLoader: ExtendibleURLClassLoader = _urlClassLoader
+
+  private[snappydata] def initURLClassLoader(parent: ClassLoader,
+      urls: Seq[URL] = Nil): Unit = synchronized {
+    val newLoader = new ExtendibleURLClassLoader(parent)
+    if (urls.nonEmpty) urls.foreach(newLoader.addURL)
+    _urlClassLoader = newLoader
+    Thread.currentThread().setContextClassLoader(newLoader)
+  }
 
   private def setPropertyIfAbsent(props: Properties, name: String, value: => String): Unit = {
     if (!props.containsKey(name)) props.setProperty(name, value)
@@ -91,8 +104,12 @@ class LeadImpl extends ServerImpl with Lead
   override def start(bootProperties: Properties, ignoreIfStarted: Boolean): Unit = {
     _directApiInvoked = true
 
-    isTestSetup = bootProperties.getProperty("isTest", "false").toBoolean
+    isTestSetup = bootProperties.getProperty("isTest", "false").equalsIgnoreCase("true")
     bootProperties.remove("isTest")
+    val enableTableCountInUI = bootProperties.getProperty(
+      Constant.RECOVERY_SHOW_TABLE_COUNTS, "false").equalsIgnoreCase("true")
+    bootProperties.remove(Constant.RECOVERY_SHOW_TABLE_COUNTS)
+
     val authSpecified = Misc.checkLDAPAuthProvider(bootProperties)
 
     ServiceUtils.setCommonBootDefaults(bootProperties, forLocator = false)
@@ -234,8 +251,7 @@ class LeadImpl extends ServerImpl with Lead
       }
 
       val parent = Thread.currentThread().getContextClassLoader
-      urlclassloader = new ExtendibleURLClassLoader(parent)
-      Thread.currentThread().setContextClassLoader(urlclassloader)
+      initURLClassLoader(parent)
 
       val sc = new SparkContext(conf)
 
@@ -263,7 +279,7 @@ class LeadImpl extends ServerImpl with Lead
           case None => Array[String]()
           case Some(c) => Array(c)
         }
-        jobServerConfig = getConfig(confFile)
+        jobServerConfig = getConfig
         val bindAddress = jobServerConfig.getString("spark.jobserver.bind-address")
         val port = jobServerConfig.getInt("spark.jobserver.port")
         startupString = s"job server on: $bindAddress[$port]"
@@ -298,7 +314,9 @@ class LeadImpl extends ServerImpl with Lead
       // start the service to gather table statistics
       SnappyTableStatsProviderService.start(sc, url = null)
 
-      if (startHiveServer) {
+      val cache = Misc.getGemFireCache
+
+      if (startHiveServer && !cache.isSnappyRecoveryMode) {
         val hiveService = SnappyHiveThriftServer2.start(useHiveSession)
         if (jobServerWait) SnappyHiveThriftServer2.getHostPort(hiveService) match {
           case None => addStartupMessage(s"Started hive thrift server ($hiveSessionKind)")
@@ -310,12 +328,20 @@ class LeadImpl extends ServerImpl with Lead
       // update the Spark UI to add the dashboard and other SnappyData pages
       ToolsCallbackInit.toolsCallback.updateUI(sc)
 
+      // start snappy metric system
+      SnappyMetricsSystem.init(sc)
+
       // start other add-on services (job server)
-      startAddOnServices(conf, confFile, jobServerConfig)
+      startAddOnServices(confFile, jobServerConfig)
 
       // finally start embedded zeppelin interpreter if configured and security is not enabled.
       if (!authSpecified) {
         checkAndStartZeppelinInterpreter(zeppelinEnabled, bootProperties)
+      }
+
+      // If recovery mode then initialize the recovery service
+      if (cache.isSnappyRecoveryMode) {
+        RecoveryService.collectViewsAndPrepareCatalog(enableTableCountInUI)
       }
 
       if (jobServerWait) {
@@ -366,12 +392,18 @@ class LeadImpl extends ServerImpl with Lead
         val primaryLeaderLock = new DistributedMemberLock(dls,
           LOCK_SERVICE_NAME, DistributedMemberLock.NON_EXPIRING_LEASE,
           DistributedMemberLock.LockReentryPolicy.PREVENT_SILENTLY)
-
         val startStatus = primaryLeaderLock.tryLock()
         // noinspection SimplifyBooleanMatch
         startStatus match {
           case true =>
             logInfo("Primary lead lock acquired.")
+
+            // store unique cluster id to metadataCmdRgn
+            val cmdRegion = Misc.getMemStore.getMetadataCmdRgn
+            val clusterUUID = cmdRegion.get(Constant.CLUSTER_ID)
+            if (clusterUUID eq null) {
+              cmdRegion.put(Constant.CLUSTER_ID, UUID.randomUUID().toString)
+            }
 
             LocalDirectoryCleanupUtil.save()
           // let go.
@@ -513,6 +545,7 @@ class LeadImpl extends ServerImpl with Lead
 
   private[snappydata] def initStartupArgs(conf: SparkConf, sc: SparkContext = null) = {
 
+    @tailrec
     def changeOrAppend(attr: String, value: String,
         overwrite: Boolean = false, ignoreIfPresent: Boolean = false,
         sparkPrefix: String = null): Unit = {
@@ -557,8 +590,8 @@ class LeadImpl extends ServerImpl with Lead
     this.notifyStatusChange = f
 
   @throws[Exception]
-  private def startAddOnServices(conf: SparkConf,
-      confFile: Array[String], jobServerConfig: Config): Unit = this.synchronized {
+  private def startAddOnServices(
+      confFile: Array[String], jobServerConfig: Config): Unit = synchronized {
     if (_directApiInvoked && !isTestSetup) {
       assert(jobServerConfig ne null,
         "JobServer must have been enabled with lead.start(..) invocation")
@@ -599,7 +632,7 @@ class LeadImpl extends ServerImpl with Lead
     }
   }
 
-  def getConfig(args: Array[String]): Config = {
+  def getConfig: Config = {
 
     val notConfigurable = ConfigFactory.parseProperties(getDynamicOverrides).
         withFallback(ConfigFactory.parseResources("jobserver-overrides.conf"))
@@ -761,6 +794,7 @@ object LeadImpl {
 
   def invokeLeadStop(): Unit = {
     val lead = ServiceManager.getLeadInstance.asInstanceOf[LeadImpl]
+    SnappyMetricsSystem.stop()
     lead.internalStop(lead.bootProperties)
   }
 }

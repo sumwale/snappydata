@@ -140,8 +140,8 @@ trait TableExec extends UnaryExecNode with CodegenSupportOnExecutor
       inputRDDs: Seq[RDD[InternalRow]]): Seq[RDD[InternalRow]] = {
     def preferredLocations(table: String): Array[Seq[String]] = {
       val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
-      val (schemaName, tableName) = JdbcExtendedUtils.getTableWithSchema(table,
-        conn = null, Some(session))
+      val (schemaName, tableName) = JdbcExtendedUtils.getTableWithDatabase(table,
+        session = Some(session))
       val relInfo = session.externalCatalog.getRelationInfo(schemaName, tableName,
         isRowTable = false)._1
       val locations = new Array[Seq[String]](numBuckets)

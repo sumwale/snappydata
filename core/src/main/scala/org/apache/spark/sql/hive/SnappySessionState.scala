@@ -53,13 +53,24 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.{Strategy, _}
 import org.apache.spark.streaming.Duration
 
-
 /**
  * Holds all session-specific state for a given [[SnappySession]].
  */
 trait SnappySessionState extends SessionState with SnappyStrategies with SparkSupport {
 
   val snappySession: SnappySession
+
+  // Holds job group id for currently running JDBC query. For JDCB query job group id is set to
+  // statement id. So this will be set only for SnappySession used for a JDBC connection.
+  @volatile private[this] var _jdbcQueryJobGroupId : Option[String] = None
+
+  def jdbcQueryJobGroupId(executionId: String): String = _jdbcQueryJobGroupId match {
+    case Some(id) => id
+    case None => executionId
+  }
+
+  def setJdbcQueryJobGroupId(id: String): Unit =
+    snappySession.synchronized(_jdbcQueryJobGroupId = Some(id))
 
   def catalogBuilder(wrapped: Option[SnappySessionCatalog]): SessionCatalog
 
@@ -697,8 +708,7 @@ trait SnappySessionState extends SessionState with SnappyStrategies with SparkSu
             // to minimize exchange
             snappyConf.setExecutionShufflePartitions(region.getTotalNumberOfBuckets)
           }
-          StoreUtils.getPartitionsPartitionedTable(snappySession, pr,
-            linkPartitionsToBuckets, preferPrimaries)
+          StoreUtils.getPartitionsPartitionedTable(pr, linkPartitionsToBuckets, preferPrimaries)
         }
       })
   }

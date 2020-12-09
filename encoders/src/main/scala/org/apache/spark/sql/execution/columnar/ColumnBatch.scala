@@ -17,7 +17,7 @@
 package org.apache.spark.sql.execution.columnar
 
 import java.nio.{ByteBuffer, ByteOrder}
-import java.sql.{Connection, ResultSet, Statement}
+import java.sql.{ResultSet, Statement}
 
 import scala.util.control.NonFatal
 
@@ -30,16 +30,18 @@ import org.eclipse.collections.api.block.procedure.Procedure
 import org.eclipse.collections.impl.map.mutable.primitive.IntObjectHashMap
 
 import org.apache.spark.memory.MemoryManagerCallback.releaseExecutionMemory
+import org.apache.spark.sql.execution.BucketsBasedIterator
 import org.apache.spark.sql.execution.columnar.encoding.{ColumnDecoder, ColumnDeleteDecoder, ColumnEncoding, UpdatedColumnDecoder, UpdatedColumnDecoderBase}
 import org.apache.spark.sql.execution.columnar.impl.{ColumnDelta, ColumnFormatEntry}
 import org.apache.spark.sql.store.CompressionUtils
 import org.apache.spark.sql.types.StructField
 import org.apache.spark.{Logging, TaskContext, TaskContextImpl, TaskKilledException}
 
-abstract class ResultSetIterator[A](conn: Connection,
-                                    stmt: Statement, rs: ResultSet, context: TaskContext,
-                                    closeConnectionOnResultsClose: Boolean = true)
-  extends Iterator[A] with Logging {
+case class ColumnBatch(numRows: Int, buffers: Array[ByteBuffer],
+    statsData: Array[Byte], deltaIndexes: Array[Int])
+
+abstract class ResultSetIterator[A](stmt: Statement, rs: ResultSet, context: TaskContext)
+    extends Iterator[A] with Logging with BucketsBasedIterator {
 
   protected[this] final var doMove = true
 
@@ -112,10 +114,10 @@ abstract class ResultSetIterator[A](conn: Connection,
   }
 }
 
-final class ColumnBatchIteratorOnRS(conn: Connection,
-                                    projection: Array[Int], stmt: Statement, rs: ResultSet,
+final class ColumnBatchIteratorOnRS(projection: Array[Int], stmt: Statement, rs: ResultSet,
                                     context: TaskContext, partitionId: Int)
-  extends ResultSetIterator[ByteBuffer](conn, stmt, rs, context) {
+  extends ResultSetIterator[ByteBuffer](stmt, rs, context) {
+
   private var currentUUID: Long = _
   // upto three deltas for each column and a deleted mask
   private val totalColumns = (projection.length * (ColumnDelta.MAX_DEPTH + 1)) + 1
@@ -124,6 +126,8 @@ final class ColumnBatchIteratorOnRS(conn: Connection,
   private var currentStats: ByteBuffer = _
   private var currentDeltaStats: ByteBuffer = _
   private var rsHasNext: Boolean = rs.next()
+
+  def getBucketSet: java.util.Set[Integer] = java.util.Collections.singleton(getCurrentBucketId)
 
   def getCurrentBatchId: Long = currentUUID
 

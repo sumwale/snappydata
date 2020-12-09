@@ -18,23 +18,23 @@ package io.snappydata.collection
 
 import com.gemstone.gemfire.internal.cache.GemFireCacheImpl
 
-final class SHAMap(initialCapacity: Int, valueSize: Int,
-  maxCapacity: Int) extends ByteBufferHashMap(initialCapacity,0.75,
-  0, valueSize, GemFireCacheImpl.getCurrentBufferAllocator,
-  null,null,0L, maxCapacity) {
+class SHAMap(initialCapacity: Int, valueSize: Int, maxCapacity: Int)
+    extends ByteBufferHashMap(initialCapacity, 0.75,
+      0, valueSize, GemFireCacheImpl.getCurrentBufferAllocator,
+      null, null, 0L, maxCapacity) {
 
   override protected def handleExisting(mapKeyObject: AnyRef, mapKeyOffset: Long,
-    valueOffset: Int): Int = {
+      valueOffset: Int): Int = {
     // Get the valueOffSet
-   // (Platform.getLong(mapKeyObject, mapKeyOffset) >>> 32L).toInt
+    // (Platform.getLong(mapKeyObject, mapKeyOffset) >>> 32L).toInt
     valueOffset
   }
 
   override protected def handleNew(mapKeyObject: AnyRef, mapKeyOffset: Long,
-    valueOffset: Int): Int = {
+      valueOffset: Int): Int = {
     // Read the value start offset before invoking handleNewInsert which may cause rehash
     // & make the mayKeyObject & mapKeyOffset invalid
-   // val valueOffset = (Platform.getLong(mapKeyObject, mapKeyOffset) >>> 32L).toInt
+    // val valueOffset = (Platform.getLong(mapKeyObject, mapKeyOffset) >>> 32L).toInt
     handleNewInsert()
     -1 * valueOffset
   }

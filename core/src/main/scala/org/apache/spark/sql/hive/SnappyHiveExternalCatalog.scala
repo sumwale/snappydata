@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 TIBCO Software Inc. All rights reserved.
+ * Copyright (c) 2017-2020 TIBCO Software Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License. You
@@ -75,8 +75,8 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
 
     // fire dummy queries to initialize more components of hive meta-store
     withHiveExceptionHandling {
-      assert(!client.tableExists(SYS_SCHEMA, "dbs"))
-      assert(!client.functionExists(SYS_SCHEMA, "funcs"))
+      assert(!client.tableExists(SYS_DATABASE, "dbs"))
+      assert(!client.functionExists(SYS_DATABASE, "funcs"))
     }
 
     // initialize the CacheLoader
@@ -197,118 +197,118 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
   // Base HiveExternalCatalog calls
   // --------------------------------------------------------------------------
 
-  protected def baseCreateDatabase(schemaDefinition: CatalogDatabase,
+  protected def baseCreateDatabase(dbDefinition: CatalogDatabase,
       ignoreIfExists: Boolean): Unit
 
-  protected def baseDropDatabase(schema: String, ignoreIfNotExists: Boolean,
+  protected def baseDropDatabase(db: String, ignoreIfNotExists: Boolean,
       cascade: Boolean): Unit
 
   protected def baseCreateTable(tableDefinition: CatalogTable, ignoreIfExists: Boolean): Unit
 
-  protected def baseDropTable(schema: String, table: String, ignoreIfNotExists: Boolean,
+  protected def baseDropTable(db: String, table: String, ignoreIfNotExists: Boolean,
       purge: Boolean): Unit
 
   protected def baseAlterTable(table: CatalogTable): Unit
 
-  protected def baseRenameTable(schema: String, oldName: String, newName: String): Unit
+  protected def baseRenameTable(db: String, oldName: String, newName: String): Unit
 
-  protected def baseLoadDynamicPartitions(schema: String, table: String, loadPath: String,
+  protected def baseLoadDynamicPartitions(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, replace: Boolean, numDP: Int, holdDDLTime: Boolean): Unit
 
-  protected def baseCreateFunction(schema: String, funcDefinition: CatalogFunction): Unit
+  protected def baseCreateFunction(db: String, funcDefinition: CatalogFunction): Unit
 
-  protected def baseDropFunction(schema: String, name: String): Unit
+  protected def baseDropFunction(db: String, name: String): Unit
 
-  protected def baseRenameFunction(schema: String, oldName: String, newName: String): Unit
+  protected def baseRenameFunction(db: String, oldName: String, newName: String): Unit
 
   // --------------------------------------------------------------------------
   // Databases
   // --------------------------------------------------------------------------
 
-  protected def createDatabaseImpl(schemaDefinition: CatalogDatabase,
+  protected def createDatabaseImpl(dbDefinition: CatalogDatabase,
       ignoreIfExists: Boolean): Unit = {
-    // dot is used for schema, name separation and will cause many problems if present
-    if (schemaDefinition.name.indexOf('.') != -1) {
+    // dot is used for database, name separation and will cause many problems if present
+    if (dbDefinition.name.indexOf('.') != -1) {
       throw new AnalysisException(
-        s"Schema '${schemaDefinition.name}' cannot contain dot in its name")
+        s"Database/Schema '${dbDefinition.name}' cannot contain dot in its name")
     }
-    // dependent tables are store comma separated so don't allow commas in schema names
-    if (schemaDefinition.name.indexOf(',') != -1) {
+    // dependent tables are store comma separated so don't allow commas in database names
+    if (dbDefinition.name.indexOf(',') != -1) {
       throw new AnalysisException(
-        s"Schema '${schemaDefinition.name}' cannot contain comma in its name")
+        s"Database/Schema '${dbDefinition.name}' cannot contain comma in its name")
     }
-    if (databaseExists(schemaDefinition.name)) {
+    if (databaseExists(dbDefinition.name)) {
       if (ignoreIfExists) return
-      else throw new AnalysisException(s"Schema ${schemaDefinition.name} already exists")
+      else throw new AnalysisException(s"Database/Schema ${dbDefinition.name} already exists")
     }
-    withHiveExceptionHandling(baseCreateDatabase(schemaDefinition, ignoreIfExists))
+    withHiveExceptionHandling(baseCreateDatabase(dbDefinition, ignoreIfExists))
   }
 
-  protected def dropDatabaseImpl(schema: String, ignoreIfNotExists: Boolean,
+  protected def dropDatabaseImpl(db: String, ignoreIfNotExists: Boolean,
       cascade: Boolean): Unit = {
-    if (schema == SYS_SCHEMA) {
-      throw new AnalysisException(s"$schema is a system preserved database/schema")
+    if (db == SYS_DATABASE) {
+      throw new AnalysisException(s"$db is a system preserved database/schema")
     }
     try {
-      withHiveExceptionHandling(baseDropDatabase(schema, ignoreIfNotExists, cascade))
+      withHiveExceptionHandling(baseDropDatabase(db, ignoreIfNotExists, cascade))
     } catch {
       case _: NoSuchDatabaseException | _: NoSuchObjectException =>
-        throw SnappyExternalCatalog.schemaNotFoundException(schema)
+        throw SnappyExternalCatalog.databaseNotFoundException(db)
     }
   }
 
-  protected def alterDatabaseImpl(schemaDefinition: CatalogDatabase): Unit = {
+  protected def alterDatabaseImpl(dbDefinition: CatalogDatabase): Unit = {
     try {
-      withHiveExceptionHandling(super.alterDatabase(schemaDefinition))
+      withHiveExceptionHandling(super.alterDatabase(dbDefinition))
     } catch {
       case _: NoSuchDatabaseException | _: NoSuchObjectException =>
-        throw SnappyExternalCatalog.schemaNotFoundException(schemaDefinition.name)
+        throw SnappyExternalCatalog.databaseNotFoundException(dbDefinition.name)
     }
   }
 
-  // Special in-built SYS schema does not have hive catalog entry so the methods below
-  // add that specifically to the existing schemas.
+  // Special in-built SYS database does not have hive catalog entry so the methods below
+  // add that specifically to the existing databases.
 
-  override def getDatabase(schema: String): CatalogDatabase = {
+  override def getDatabase(db: String): CatalogDatabase = {
     try {
-      if (schema == SYS_SCHEMA) systemSchemaDefinition
-      else withHiveExceptionHandling(super.getDatabase(schema).copy(name = schema))
+      if (db == SYS_DATABASE) systemDatabaseDefinition
+      else withHiveExceptionHandling(super.getDatabase(db).copy(name = db))
     } catch {
       case _: NoSuchDatabaseException | _: NoSuchObjectException =>
-        throw SnappyExternalCatalog.schemaNotFoundException(schema)
+        throw SnappyExternalCatalog.databaseNotFoundException(db)
     }
   }
 
-  override def databaseExists(schema: String): Boolean = {
-    if (schema == SYS_SCHEMA) true
+  override def databaseExists(db: String): Boolean = {
+    if (db == SYS_DATABASE) true
     else {
       // if cache is small enough then linearly search in it since hive call is expensive
       if (cachedCatalogTables.size() <= 200) {
         val itr = cachedCatalogTables.asMap().keySet().iterator()
         while (itr.hasNext) {
-          if (itr.next()._1 == schema) return true
+          if (itr.next()._1 == db) return true
         }
       }
-      withHiveExceptionHandling(super.databaseExists(schema))
+      withHiveExceptionHandling(super.databaseExists(db))
     }
   }
 
   override def listDatabases(): Seq[String] = {
-    (withHiveExceptionHandling(super.listDatabases().toSet) + SYS_SCHEMA)
+    (withHiveExceptionHandling(super.listDatabases().toSet) + SYS_DATABASE)
         .toSeq.sorted
   }
 
   override def listDatabases(pattern: String): Seq[String] = {
     (withHiveExceptionHandling(super.listDatabases(pattern).toSet) ++
-        StringUtils.filterPattern(Seq(SYS_SCHEMA), pattern)).toSeq.sorted
+        StringUtils.filterPattern(Seq(SYS_DATABASE), pattern)).toSeq.sorted
   }
 
-  override def setCurrentDatabase(schema: String): Unit = {
+  override def setCurrentDatabase(db: String): Unit = {
     try {
-      withHiveExceptionHandling(super.setCurrentDatabase(schema))
+      withHiveExceptionHandling(super.setCurrentDatabase(db))
     } catch {
       case _: NoSuchDatabaseException | _: NoSuchObjectException =>
-        throw SnappyExternalCatalog.schemaNotFoundException(schema)
+        throw SnappyExternalCatalog.databaseNotFoundException(db)
     }
   }
 
@@ -411,20 +411,19 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     if (!ifExists && (CatalogObjectType.isTableBackedByRegion(
       CatalogObjectType.getTableType(catalogTable)) || isGemFireTable)) {
       withHiveExceptionHandling {
-        val schemaName = catalogTable.database
+        val dbName = catalogTable.database
         val tableName = catalogTable.identifier.table
-        if (client.tableExists(schemaName, tableName)) {
+        if (client.tableExists(dbName, tableName)) {
           // This is the case of CTAS or GemFire. With CTAS ignoreIfExists is always false at this
           // point and any non-CTAS case with ignoreIfExists=false would have failed much earlier
           // when creating the backing region since table already exists for the Some(.) case.
           // Recreate the catalog table because final properties may be slightly different.
           if (isGemFireTable) ifExists = true
-          else client.dropTable(schemaName, tableName, ignoreIfNotExists = true, purge = false)
-          invalidate(schemaName -> tableName)
+          else client.dropTable(dbName, tableName, ignoreIfNotExists = true, purge = false)
+          invalidate(dbName -> tableName)
         }
       }
     }
-
     try {
       withHiveExceptionHandling(baseCreateTable(catalogTable, ifExists))
     } catch {
@@ -438,13 +437,13 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     registerCatalogSchemaChange(refreshRelations)
   }
 
-  def dropTableUnsafe(schema: String, table: String, forceDrop: Boolean): Unit = {
+  def dropTableUnsafe(db: String, table: String, forceDrop: Boolean): Unit = {
     try {
-      super.getTable(schema, table)
+      super.getTable(db, table)
       // no exception raised while getting catalogTable
       if (forceDrop) {
         // parameter to force drop entry from metastore is set
-        withHiveExceptionHandling(super.dropTable(schema, table,
+        withHiveExceptionHandling(super.dropTable(db, table,
           ignoreIfNotExists = true, purge = true))
       } else {
         // AnalysisException not thrown while getting table. suspecting that wrong table
@@ -455,40 +454,40 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     } catch {
       case a: AnalysisException if a.message.contains("might be inconsistent in hive catalog") =>
         // exception is expected as table might be inconsistent. continuing to drop
-        withHiveExceptionHandling(super.dropTable(schema, table,
+        withHiveExceptionHandling(super.dropTable(db, table,
           ignoreIfNotExists = true, purge = true))
     }
 
     SnappySession.clearAllCache(onlyQueryPlanCache = true)
     CodeGeneration.clearAllCache()
-    invalidate(schema -> table)
+    invalidate(db -> table)
   }
 
-  protected def dropTableImpl(schema: String, table: String, ignoreIfNotExists: Boolean,
+  protected def dropTableImpl(db: String, table: String, ignoreIfNotExists: Boolean,
       purge: Boolean): Unit = {
-    val tableDefinition = getTableIfExists(schema, table) match {
+    val tableDefinition = getTableIfExists(db, table) match {
       case None =>
-        if (ignoreIfNotExists) return else throw new TableNotFoundException(schema, table)
+        if (ignoreIfNotExists) return else throw new TableNotFoundException(db, table)
       case Some(t) => t
     }
-    withHiveExceptionHandling(baseDropTable(schema, table, ignoreIfNotExists, purge))
+    withHiveExceptionHandling(baseDropTable(db, table, ignoreIfNotExists, purge))
 
     // drop all policies for the table
     if (Misc.getMemStoreBooting.isRLSEnabled) {
-      val policies = getPolicies(schema, table, tableDefinition.properties)
+      val policies = getPolicies(db, table, tableDefinition.properties)
       if (policies.nonEmpty) for (policy <- policies) {
-        val schemaName = policy.database
+        val dbName = policy.database
         val policyName = policy.identifier.table
-        withHiveExceptionHandling(baseDropTable(schemaName, policyName,
+        withHiveExceptionHandling(baseDropTable(dbName, policyName,
           ignoreIfNotExists = true, purge = false))
-        invalidate(schemaName -> policyName)
+        invalidate(dbName -> policyName)
       }
     }
 
     // remove from base table if this is a dependent relation
     val refreshRelations = getTableWithBaseTable(tableDefinition)
     if (refreshRelations.length > 1) {
-      val dependent = s"$schema.$table"
+      val dependent = s"$db.$table"
       removeDependentFromBase(refreshRelations.head, dependent)
     }
 
@@ -498,7 +497,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
 
   protected def alterTableImpl(tableDefinition: CatalogTable): Unit = {
     val catalogTable = addViewProperties(tableDefinition)
-    val schemaName = catalogTable.database
+    val dbName = catalogTable.database
     val tableName = catalogTable.identifier.table
 
     // if schema has changed then assume only that has to be changed and add the schema
@@ -520,20 +519,20 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
         withHiveExceptionHandling(client.alterTable(oldRawDefinition.copy(
           schema = catalogTable.schema, properties = newProps.toMap)))
 
-        registerCatalogSchemaChange(schemaName -> tableName :: Nil)
+        registerCatalogSchemaChange(dbName -> tableName :: Nil)
         return
       }
     }
 
     withHiveExceptionHandling(baseAlterTable(catalogTable))
 
-    registerCatalogSchemaChange(schemaName -> tableName :: Nil)
+    registerCatalogSchemaChange(dbName -> tableName :: Nil)
   }
 
-  protected def renameTableImpl(schema: String, oldName: String, newName: String): Unit = {
-    withHiveExceptionHandling(baseRenameTable(schema, oldName, newName))
+  protected def renameTableImpl(db: String, oldName: String, newName: String): Unit = {
+    withHiveExceptionHandling(baseRenameTable(db, oldName, newName))
 
-    registerCatalogSchemaChange(schema -> oldName :: schema -> newName :: Nil)
+    registerCatalogSchemaChange(db -> oldName :: db -> newName :: Nil)
   }
 
   /**
@@ -587,10 +586,10 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     } else newTable
   }
 
-  override protected def getCachedCatalogTable(schema: String, table: String): CatalogTable = {
-    val name = schema -> table
+  override protected def getCachedCatalogTable(db: String, table: String): CatalogTable = {
+    val name = db -> table
     if (nonExistentTables.getIfPresent(name) eq java.lang.Boolean.TRUE) {
-      throw new TableNotFoundException(schema, table)
+      throw new TableNotFoundException(db, table)
     }
     // need to do the load under a sync block to avoid deadlock due to lock inversion
     // (sync block and map loader future) so do a get separately first
@@ -607,12 +606,12 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     r
   }
 
-  override def getRelationInfo(schema: String, table: String,
+  override def getRelationInfo(db: String, table: String,
       rowTable: Boolean): (RelationInfo, Option[LocalRegion]) = {
-    if (SYS_SCHEMA.equalsIgnoreCase(schema)) {
+    if (SYS_DATABASE.equalsIgnoreCase(db)) {
       RelationInfo(1, isPartitioned = false) -> None
     } else {
-      val r = Misc.getRegion(Misc.getRegionPath(JdbcExtendedUtils.toUpperCase(schema),
+      val r = Misc.getRegion(Misc.getRegionPath(JdbcExtendedUtils.toUpperCase(db),
         JdbcExtendedUtils.toUpperCase(table), null),
         true, false).asInstanceOf[LocalRegion]
       val indexCols = if (rowTable) {
@@ -633,7 +632,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     }
   }
 
-  override def createPolicy(schemaName: String, policyName: String, targetTable: String,
+  override def createPolicy(dbName: String, policyName: String, targetTable: String,
       policyFor: String, policyApplyTo: Seq[String], expandedPolicyApplyTo: Seq[String],
       owner: String, filterString: String): Unit = {
 
@@ -646,7 +645,7 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
       expandedPolicyApplyTo.mkString(","))
     policyProperties.put(PolicyProperties.policyOwner, owner)
     val tableDefinition = CatalogTable(
-      identifier = TableIdentifier(policyName, Some(schemaName)),
+      identifier = TableIdentifier(policyName, Some(dbName)),
       tableType = CatalogTableType.EXTERNAL,
       schema = JdbcExtendedUtils.EMPTY_SCHEMA,
       provider = Some("policy"),
@@ -679,29 +678,29 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
     }
   }
 
-  override def tableExists(schema: String, table: String): Boolean = {
+  override def tableExists(db: String, table: String): Boolean = {
     try {
-      getTable(schema, table) ne null
+      getTable(db, table) ne null
     } catch {
       case _: NoSuchTableException => false
     }
   }
 
-  override def listTables(schema: String): Seq[String] = {
-    if (SYS_SCHEMA.equalsIgnoreCase(schema)) listTables(schema, "*")
-    else withHiveExceptionHandling(super.listTables(schema))
+  override def listTables(db: String): Seq[String] = {
+    if (SYS_DATABASE.equalsIgnoreCase(db)) listTables(db, "*")
+    else withHiveExceptionHandling(super.listTables(db))
   }
 
-  override def listTables(schema: String, pattern: String): Seq[String] = {
-    if (SYS_SCHEMA.equalsIgnoreCase(schema)) {
+  override def listTables(db: String, pattern: String): Seq[String] = {
+    if (SYS_DATABASE.equalsIgnoreCase(db)) {
       // check for a system table/VTI in store
       val session = SparkSession.getActiveSession
-      val conn = ConnectionUtil.getPooledConnection(schema, new ConnectionConf(
+      val conn = ConnectionUtil.getPooledConnection(db, new ConnectionConf(
         ExternalStoreUtils.validateAndGetAllProps(session, ExternalStoreUtils.emptyCIMutableMap)))
       try {
         // hive compatible filter patterns are different from JDBC ones
-        // so get all tables in the schema and apply filter separately
-        val rs = conn.getMetaData.getTables(null, JdbcExtendedUtils.toUpperCase(schema), "%", null)
+        // so get all tables in the database and apply filter separately
+        val rs = conn.getMetaData.getTables(null, JdbcExtendedUtils.toUpperCase(db), "%", null)
         val buffer = new mutable.ArrayBuffer[String]()
         // add special case sys.members which is a distributed VTI but used by
         // SnappyData layer as a replicated one
@@ -717,109 +716,109 @@ abstract class SnappyHiveExternalCatalog(val conf: SparkConf,
       } finally {
         conn.close()
       }
-    } else withHiveExceptionHandling(super.listTables(schema, pattern))
+    } else withHiveExceptionHandling(super.listTables(db, pattern))
   }
 
-  override def loadTable(schema: String, table: String, loadPath: String,
+  override def loadTable(db: String, table: String, loadPath: String,
       isOverwrite: Boolean, holdDDLTime: Boolean): Unit = {
-    withHiveExceptionHandling(super.loadTable(schema, table, loadPath, isOverwrite, holdDDLTime))
+    withHiveExceptionHandling(super.loadTable(db, table, loadPath, isOverwrite, holdDDLTime))
   }
 
   // --------------------------------------------------------------------------
   // Partitions
   // --------------------------------------------------------------------------
 
-  override def createPartitions(schema: String, table: String, parts: Seq[CatalogTablePartition],
+  override def createPartitions(db: String, table: String, parts: Seq[CatalogTablePartition],
       ignoreIfExists: Boolean): Unit = {
-    withHiveExceptionHandling(super.createPartitions(schema, table, parts, ignoreIfExists))
+    withHiveExceptionHandling(super.createPartitions(db, table, parts, ignoreIfExists))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def dropPartitions(schema: String, table: String, parts: Seq[TablePartitionSpec],
+  override def dropPartitions(db: String, table: String, parts: Seq[TablePartitionSpec],
       ignoreIfNotExists: Boolean, purge: Boolean, retainData: Boolean): Unit = {
-    withHiveExceptionHandling(super.dropPartitions(schema, table, parts, ignoreIfNotExists,
+    withHiveExceptionHandling(super.dropPartitions(db, table, parts, ignoreIfNotExists,
       purge, retainData))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def renamePartitions(schema: String, table: String, specs: Seq[TablePartitionSpec],
+  override def renamePartitions(db: String, table: String, specs: Seq[TablePartitionSpec],
       newSpecs: Seq[TablePartitionSpec]): Unit = {
-    withHiveExceptionHandling(super.renamePartitions(schema, table, specs, newSpecs))
+    withHiveExceptionHandling(super.renamePartitions(db, table, specs, newSpecs))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def alterPartitions(schema: String, table: String,
+  override def alterPartitions(db: String, table: String,
       parts: Seq[CatalogTablePartition]): Unit = {
-    withHiveExceptionHandling(super.alterPartitions(schema, table, parts))
+    withHiveExceptionHandling(super.alterPartitions(db, table, parts))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def loadPartition(schema: String, table: String, loadPath: String,
+  override def loadPartition(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, isOverwrite: Boolean, holdDDLTime: Boolean,
       inheritTableSpecs: Boolean): Unit = {
-    withHiveExceptionHandling(super.loadPartition(schema, table, loadPath, partition,
+    withHiveExceptionHandling(super.loadPartition(db, table, loadPath, partition,
       isOverwrite, holdDDLTime, inheritTableSpecs))
   }
 
-  protected def loadDynamicPartitionsImpl(schema: String, table: String, loadPath: String,
+  protected def loadDynamicPartitionsImpl(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, replace: Boolean, numDP: Int, holdDDLTime: Boolean): Unit = {
-    withHiveExceptionHandling(baseLoadDynamicPartitions(schema, table, loadPath, partition,
+    withHiveExceptionHandling(baseLoadDynamicPartitions(db, table, loadPath, partition,
       replace, numDP, holdDDLTime))
   }
 
-  override def getPartition(schema: String, table: String,
+  override def getPartition(db: String, table: String,
       spec: TablePartitionSpec): CatalogTablePartition = {
-    withHiveExceptionHandling(super.getPartition(schema, table, spec))
+    withHiveExceptionHandling(super.getPartition(db, table, spec))
   }
 
-  override def getPartitionOption(schema: String, table: String,
+  override def getPartitionOption(db: String, table: String,
       spec: TablePartitionSpec): Option[CatalogTablePartition] = {
-    withHiveExceptionHandling(super.getPartitionOption(schema, table, spec))
+    withHiveExceptionHandling(super.getPartitionOption(db, table, spec))
   }
 
-  override def listPartitionNames(schema: String, table: String,
+  override def listPartitionNames(db: String, table: String,
       partialSpec: Option[TablePartitionSpec]): Seq[String] = {
-    withHiveExceptionHandling(super.listPartitionNames(schema, table, partialSpec))
+    withHiveExceptionHandling(super.listPartitionNames(db, table, partialSpec))
   }
 
-  override def listPartitions(schema: String, table: String,
+  override def listPartitions(db: String, table: String,
       partialSpec: Option[TablePartitionSpec] = None): Seq[CatalogTablePartition] = {
-    withHiveExceptionHandling(super.listPartitions(schema, table, partialSpec))
+    withHiveExceptionHandling(super.listPartitions(db, table, partialSpec))
   }
 
   // --------------------------------------------------------------------------
   // Functions
   // --------------------------------------------------------------------------
 
-  protected def createFunctionImpl(schema: String, funcDefinition: CatalogFunction): Unit = {
-    withHiveExceptionHandling(baseCreateFunction(schema, funcDefinition))
+  protected def createFunctionImpl(db: String, funcDefinition: CatalogFunction): Unit = {
+    withHiveExceptionHandling(baseCreateFunction(db, funcDefinition))
     SnappySession.clearAllCache()
   }
 
-  protected def dropFunctionImpl(schema: String, name: String): Unit = {
-    withHiveExceptionHandling(baseDropFunction(schema, name))
+  protected def dropFunctionImpl(db: String, name: String): Unit = {
+    withHiveExceptionHandling(baseDropFunction(db, name))
     SnappySession.clearAllCache()
   }
 
-  protected def renameFunctionImpl(schema: String, oldName: String, newName: String): Unit = {
-    withHiveExceptionHandling(baseRenameFunction(schema, oldName, newName))
+  protected def renameFunctionImpl(db: String, oldName: String, newName: String): Unit = {
+    withHiveExceptionHandling(baseRenameFunction(db, oldName, newName))
     SnappySession.clearAllCache()
   }
 
-  override def getFunction(schema: String, funcName: String): CatalogFunction = {
-    withHiveExceptionHandling(super.getFunction(schema, funcName))
+  override def getFunction(db: String, funcName: String): CatalogFunction = {
+    withHiveExceptionHandling(super.getFunction(db, funcName))
   }
 
-  override def functionExists(schema: String, funcName: String): Boolean = {
-    withHiveExceptionHandling(super.functionExists(schema, funcName))
+  override def functionExists(db: String, funcName: String): Boolean = {
+    withHiveExceptionHandling(super.functionExists(db, funcName))
   }
 
-  override def listFunctions(schema: String, pattern: String): Seq[String] = {
-    withHiveExceptionHandling(super.listFunctions(schema, pattern))
+  override def listFunctions(db: String, pattern: String): Seq[String] = {
+    withHiveExceptionHandling(super.listFunctions(db, pattern))
   }
 
   /**
@@ -878,18 +877,23 @@ object SnappyHiveExternalCatalog extends SparkSupport {
   private[sql] val ignoreIfExists: ThreadLocal[java.lang.Boolean] =
     new ThreadLocal[java.lang.Boolean]()
 
-  def getInstance(sparkConf: SparkConf,
-      hadoopConf: Configuration): SnappyHiveExternalCatalog = synchronized {
+  @GuardedBy("this")
+  private[hive] def getInstanceIfCurrent: Option[SnappyHiveExternalCatalog] = {
     val catalog = instance
-    val createTime = Misc.getMemStoreBooting.getCreateTime
     if (catalog ne null) {
       // Check if it is being invoked for the same instance of GemFireStore.
       // We don't store the store instance itself to avoid a dangling reference to
       // entire store even after shutdown, rather compare its creation time.
-      if (createTime == catalog.createTime) return catalog
-      close()
-    }
+      if (Misc.getMemStoreBooting.getCreateTime == catalog.createTime) Some(catalog)
+      else {
+        close()
+        None
+      }
+    } else None
+  }
 
+  def newInstance(sparkConf: SparkConf,
+      hadoopConf: Configuration): SnappyHiveExternalCatalog = synchronized {
     // Reduce log level to error during hive client initialization
     // as it generates hundreds of lines of logs which are of no use.
     // Once the initialization is done, restore the logging level.
@@ -905,7 +909,8 @@ object SnappyHiveExternalCatalog extends SparkSupport {
       log4jLogger.setLevel(Level.ERROR)
     }
     try {
-      instance = internals.newEmbeddedHiveCatalog(sparkConf, hadoopConf, createTime)
+      instance = internals.newEmbeddedHiveCatalog(sparkConf, hadoopConf,
+        Misc.getMemStoreBooting.getCreateTime)
     } finally {
       logger.setLevel(previousLevel)
       log4jLogger.setLevel(log4jLevel)

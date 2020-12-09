@@ -105,14 +105,12 @@ case class ColumnUpdateExec(child: SparkPlan, columnTable: String,
 
   override protected def doProduce(ctx: CodegenContext): String = {
     val sql = new StringBuilder
-    sql.append("UPDATE ").append(quotedName(resolvedName, escapeQuotes = true)).append(" SET ")
-    JdbcExtendedUtils.fillColumnsClause(sql, updateColumns.map(_.name),
-      escapeQuotes = true, separator = ", ")
+    sql.append("UPDATE ").append(quotedName(resolvedName)).append(" SET ")
+    JdbcExtendedUtils.fillColumnsClause(sql, updateColumns.map(_.name), separator = ", ")
     sql.append(" WHERE ")
     // only the ordinalId is required apart from partitioning columns
     if (keyColumns.length > 4) {
-      JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.dropRight(4).map(_.name),
-        escapeQuotes = true)
+      JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.dropRight(4).map(_.name))
       sql.append(" AND ")
     }
     sql.append(StoreUtils.ROWID_COLUMN_NAME).append("=?")

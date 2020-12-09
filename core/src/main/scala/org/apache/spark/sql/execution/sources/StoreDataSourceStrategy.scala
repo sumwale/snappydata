@@ -38,7 +38,7 @@ package org.apache.spark.sql.execution.sources
 import scala.collection.mutable
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, AttributeSet, EmptyRow, Expression, NamedExpression, ParamLiteral, PredicateHelper, TokenLiteral}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeMap, AttributeReference, AttributeSet, EmptyRow, Expression, NamedExpression, ParamLiteral, PredicateHelper, TokenLiteral}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project, UnaryNode, Filter => LFilter}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow, analysis, expressions}
 import org.apache.spark.sql.execution.PartitionedDataSourceScan
@@ -371,8 +371,16 @@ object PhysicalScan extends PredicateHelper with SparkSupport {
     plan match {
       case Project(fields, child) =>
         val (_, filters, other, aliases) = collectProjectsAndFilters(child)
-        val substitutedFields = fields.map(substitute(aliases)).asInstanceOf[Seq[NamedExpression]]
-        (Some(substitutedFields), filters, other, collectAliases(substitutedFields))
+        val (deterministicFields, nonDeterministicFields) = fields.span(_.deterministic)
+        val substitutedDeterministicFields = deterministicFields.
+            map(substitute(aliases)).asInstanceOf[Seq[NamedExpression]]
+        val substitutedNonDeterministicFields = nonDeterministicFields.
+            map(substitute(aliases)).asInstanceOf[Seq[NamedExpression]]
+        val plan =
+          if (nonDeterministicFields.isEmpty) other
+          else Project(substitutedNonDeterministicFields, other)
+        (Some(substitutedDeterministicFields ++ substitutedNonDeterministicFields),
+            filters, plan, collectAliases(substitutedDeterministicFields))
 
       case LFilter(condition, child) =>
         val (fields, filters, other, aliases) = collectProjectsAndFilters(child)
@@ -385,9 +393,11 @@ object PhysicalScan extends PredicateHelper with SparkSupport {
       case other => (None, Nil, other, Map.empty)
     }
 
-  private def collectAliases(fields: Seq[Expression]): Map[Attribute, Expression] = fields.collect {
-    case a@Alias(child, _) => a.toAttribute -> child
-  }.toMap
+  private def collectAliases(fields: Seq[Expression]): AttributeMap[Expression] = {
+    AttributeMap[Expression](fields.collect {
+      case a@Alias(child, _) => a.toAttribute -> child
+    })
+  }
 
   private def substitute(aliases: Map[Attribute, Expression])(expr: Expression): Expression = {
     expr.transform {

@@ -55,8 +55,8 @@ object RuleUtils extends PredicateHelper with SparkSupport {
     val catalog = snappySession.sessionCatalog
     table.collect {
       case lr: LogicalRelation if lr.relation.isInstanceOf[PartitionedDataSourceScan] =>
-        val (schemaName, table) = JdbcExtendedUtils.getTableWithSchema(
-          lr.relation.asInstanceOf[PartitionedDataSourceScan].table, null, Some(snappySession))
+        val (schemaName, table) = JdbcExtendedUtils.getTableWithDatabase(
+          lr.relation.asInstanceOf[PartitionedDataSourceScan].table, session = Some(snappySession))
         (lr.asInstanceOf[LogicalPlan], catalog.snappyExternalCatalog.getDependentsFromProperties(
           schemaName, table, includeTypes = CatalogObjectType.Index :: Nil)
             .flatMap(getIndex(catalog, _)))

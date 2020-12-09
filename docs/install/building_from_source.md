@@ -8,7 +8,7 @@
  
 **Latest release branch**
 ```pre
-> git clone https://github.com/SnappyDataInc/snappydata.git -b branch-<release-version> --recursive
+> git clone https://github.com/SnappyDataInc/snappydata.git -b v<release-version> --recursive
 > cd snappydata
 > ./gradlew product
 ```
@@ -21,24 +21,6 @@
 ```
 
 The product is in **build-artifacts/scala-2.11/snappy**
-
-## Build only the Top-level Components
-
-Use this option if you want to build only the top-level SnappyData project and pull in jars for other projects (spark, store, spark-jobserver):
-
-**Latest release branch**
-```pre
-> git clone https://github.com/SnappyDataInc/snappydata.git -b branch-<release-version>
-> cd snappydata
-> ./gradlew product
-```
-
-**Master**
-```pre
-> git clone https://github.com/SnappyDataInc/snappydata.git
-> cd snappydata
-> ./gradlew product
-```
 
 ## Repository Layout
 
@@ -149,6 +131,8 @@ To import into IntelliJ IDEA:
 * If the Gradle tab is not visible immediately, then select it from option available at the bottom-left of IDE. Click on that window list icon for the tabs to be displayed permanently.
 
 * Generate Apache Avro and SnappyData required sources by expanding: **snappydata_2.11> Tasks> other**. Right-click on **generateSources** and run it. The **Run** option may not be available if indexing is still in progress, wait for indexing to complete, and then try again. <br> The first run may take some time to complete, as it downloads the jar files and other required files. This step has to be done the first time, or if **./gradlew clean** has been run, or if you have made changes to **javacc/avro/messages.xml** source files.
+
+*	Go to **File> Settings> Build, Execution, Deployment> Build tools> Gradle**. Enter **-DideaBuild** in the **Gradle VM Options** textbox.
 
 * If you get unexpected **Database not found** or **NullPointerException** errors in SnappyData-store/GemFireXD layer, run the **generateSources** target (Gradle tab) again.
 

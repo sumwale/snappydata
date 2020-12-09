@@ -36,6 +36,7 @@ import org.eclipse.collections.impl.map.mutable.UnifiedMap
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.collection.{SharedUtils, SmartExecutorBucketPartition}
 import org.apache.spark.sql.execution.datasources.jdbc.{DriverRegistry, JDBCOptions, JdbcUtils}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.JdbcExtendedUtils
 import org.apache.spark.sql.store.StoreUtils
 import org.apache.spark.{Logging, Partition, SparkContext, SparkEnv}
@@ -81,8 +82,8 @@ class SmartConnectorHelper(session: SparkSession, jdbcUrl: String) extends Loggi
     securePart
   }
 
-  def setCurrentSchema(schema: String): Unit = {
-    conn.setSchema(schema)
+  def setCurrentDatabase(db: String): Unit = {
+    conn.setSchema(db)
   }
 
   private def executeGetJarsStmt(sc: SparkContext, stmt: CallableStatement): Unit = {
@@ -222,14 +223,11 @@ object SmartConnectorHelper {
   }
 
   def setBucketToServerMappingInfo(numBuckets: Int, buckets: java.util.List[BucketOwners],
-      session: SparkSession): Array[ArrayBuffer[(String, String)]] = {
+      conf: => SQLConf): Array[ArrayBuffer[(String, String)]] = {
     if (!buckets.isEmpty) {
       // check if Spark executors are using IP addresses or host names
       val preferHost = preferHostName
-      val preferPrimaries = session.conf.getOption(Property.PreferPrimariesInQuery.name) match {
-        case None => Property.PreferPrimariesInQuery.defaultValue.get
-        case Some(p) => p.toBoolean
-      }
+      val preferPrimaries = Property.PreferPrimariesInQuery.get(conf)
       var orphanBuckets: ArrayBuffer[Int] = null
       val allNetUrls = new Array[ArrayBuffer[(String, String)]](numBuckets)
       val availableNetUrls = new UnifiedMap[String, String](4)
@@ -274,8 +272,8 @@ object SmartConnectorHelper {
     Array.empty
   }
 
-  def setReplicasToServerMappingInfo(replicaNodes: java.util.List[String],
-      session: SparkSession): Array[ArrayBuffer[(String, String)]] = {
+  def setReplicasToServerMappingInfo(
+      replicaNodes: java.util.List[String]): Array[ArrayBuffer[(String, String)]] = {
     // check if Spark executors are using IP addresses or host names
     val preferHost = preferHostName
     val urlPrefix = Constant.DEFAULT_THIN_CLIENT_URL
@@ -300,7 +298,7 @@ object SmartConnectorHelper {
   * host1/addr1[port1]{kind1},host2/addr2[port2]{kind2},...
   */
   private lazy val addrPattern =
-    java.util.regex.Pattern.compile("([^,/]*)(/[^,\\[]+)?\\[([\\d]+)\\](\\{[^}]+\\})?")
+    java.util.regex.Pattern.compile("([^,/]*)(/[^,\\[]+)?\\[([\\d]+)](\\{[^}]+})?")
 
   private def returnHostPortFromServerString(serverStr: String): (String, String, String) = {
     if (serverStr == null || serverStr.length == 0) {

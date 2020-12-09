@@ -23,6 +23,7 @@
 
 *.class
 aqp
+!core/**/aqp
 benchmarking/
 hydraLogs/
 snappy-connectors/

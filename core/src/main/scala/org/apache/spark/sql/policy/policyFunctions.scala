@@ -55,7 +55,7 @@ case class CurrentUser() extends LeafExpression with CodegenFallback {
   override def eval(input: InternalRow): Any = {
     val snappySession = SparkSession.getActiveSession.getOrElse(
       throw new IllegalStateException("SnappySession unavailable")).asInstanceOf[SnappySession]
-    val owner = snappySession.conf.get(Attribute.USERNAME_ATTR, Constant.DEFAULT_SCHEMA)
+    val owner = snappySession.conf.get(Attribute.USERNAME_ATTR, Constant.DEFAULT_DATABASE)
     // normalize the name for string comparison
     UTF8String.fromString(IdUtil.getUserAuthorizationId(owner))
   }
@@ -91,7 +91,7 @@ case class LdapGroupsOfCurrentUser() extends LeafExpression with CodegenFallback
     var owner = snappySession.conf.get(Attribute.USERNAME_ATTR, "")
 
     owner = IdUtil.getUserAuthorizationId(
-      if (owner.isEmpty) Constant.DEFAULT_SCHEMA
+      if (owner.isEmpty) Constant.DEFAULT_DATABASE
       else snappySession.sessionCatalog.formatName(owner))
 
     val array = ExternalStoreUtils.getLdapGroupsForUser(owner).map(UTF8String.fromString)

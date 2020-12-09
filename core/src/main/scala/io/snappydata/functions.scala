@@ -94,7 +94,7 @@ object SnappyDataFunctions {
   def getDSID(connProps: ConnectionProperties): String = connProps match {
     case null => Misc.getMyId.getId
     case _ =>
-      val conn = ConnectionUtil.getPooledConnection(SnappyExternalCatalog.SYS_SCHEMA,
+      val conn = ConnectionUtil.getPooledConnection(SnappyExternalCatalog.SYS_DATABASE,
         new ConnectionConf(connProps))
       try {
         val stmt = conn.createStatement()

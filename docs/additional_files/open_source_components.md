@@ -6,8 +6,8 @@ The capabilities of the **Community Edition** and the additional capabilities of
 
 | Feature | Community | Enterprise|
 | ------------- |:-------------:| :-----:|
-|Mutable Row & Column Store| X | X |
-|Compatibility with Spark     | X | X |
+| Mutable Row & Column Store | X | X |
+| Compatibility with Spark | X | X |
 | Shared Nothing Persistence and HA | X | X |
 | REST API for Spark Job Submission | X | X |
 | Fault Tolerance for Driver | X | X |
@@ -18,13 +18,13 @@ The capabilities of the **Community Edition** and the additional capabilities of
 | Support for transactions in Row tables | X | X |
 | Support for indexing in Row Tables | X | X |
 | SQL extensions for stream processing | X | X |
-| Runtime deployment of packages and jars | X  | X |
+| Runtime deployment of packages and jars | X | X |
 | Synopsis Data Engine for Approximate Querying |  | X |
 | ODBC Driver with High Concurrency |  | X |
-| Off-heap data storage for column tabes |  | X |
+| Off-heap data storage for column tables | X | X |
 | CDC Stream receiver for SQL Server into SnappyData |  | X |
 | GemFire/Apache Geode connector |  | X |
-|Row Level Security|  | X |
-| Use encrypted password instead of clear text password |  | X |
-| Restrict Table, View, Function creation even in user’s own schema|  | X |
-| LDAP security interface |  | X |
+| Row Level Security | X | X |
+| Use encrypted password instead of clear text password | X | X |
+| Restrict Table, View, Function creation even in user’s own schema | X | X |
+| LDAP security interface | X | X |

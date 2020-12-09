@@ -56,7 +56,7 @@ private[sql] final class PreserveLocationsRDD[U: ClassTag, T: ClassTag](
 class DelegateRDD[T: ClassTag](
     sc: SparkContext,
     val baseRdd: RDD[T],
-    val otherRDDs : Seq[RDD[T]],
+    val otherRDDs: Seq[RDD[T]],
     preferredLocations: Array[Seq[String]] = null,
     allDependencies: Seq[Dependency[_]] = null)
     extends RDD[T](sc,
@@ -80,7 +80,7 @@ class DelegateRDD[T: ClassTag](
     baseRdd.compute(split, context)
 }
 
-case class EmptyIteratorWithRowCount[U](rowCount : Long) extends Iterator[U] {
+case class EmptyIteratorWithRowCount[U](rowCount: Long) extends Iterator[U] {
   def hasNext: Boolean = false
   def next(): Nothing = throw new NoSuchElementException("next on empty iterator")
 }

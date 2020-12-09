@@ -53,9 +53,6 @@ abstract class JdbcExtendedDialect extends JdbcDialect {
    */
   def getJDBCType(dataType: DataType, md: Metadata): Option[JdbcType]
 
-  /** Create a new schema. */
-  def createSchema(schemaName: String, conn: Connection): Unit
-
   /**
    * Get the DDL to truncate a table, or null/empty
    * if truncate is not supported.
@@ -77,9 +74,9 @@ abstract class JdbcExtendedDialect extends JdbcDialect {
 
 object JdbcExtendedUtils extends Logging {
 
-  val SYSIBM_SCHEMA: String = "sysibm"
+  val SYSIBM_DATABASE: String = "sysibm"
   val DUMMY_TABLE_NAME: String = "sysdummy1"
-  val DUMMY_TABLE_QUALIFIED_NAME: String = toUpperCase(s"$SYSIBM_SCHEMA.$DUMMY_TABLE_NAME")
+  val DUMMY_TABLE_QUALIFIED_NAME: String = toUpperCase(s"$SYSIBM_DATABASE.$DUMMY_TABLE_NAME")
   val EMPTY_SCHEMA: StructType = StructType(Nil)
 
   def executeUpdate(sql: String, conn: Connection): Unit = {
@@ -200,29 +197,31 @@ object JdbcExtendedUtils extends Logging {
   }
 
   // when forSpark=false then values will be converted to upper-case for snappy-store
-  def getTableWithSchema(table: String, conn: Connection,
-      session: Option[SparkSession], forSpark: Boolean = true): (String, String) = {
+  def getTableWithDatabase(table: String, conn: Connection = null,
+      session: Option[SparkSession] = None, forSpark: java.lang.Boolean = java.lang.Boolean.TRUE,
+      defaultDb: String = ""): (String, String) = {
     val dotIndex = table.indexOf('.')
-    val schemaName = if (dotIndex > 0) {
-      table.substring(0, dotIndex)
-    } else session match {
-      case None if conn != null => conn.getSchema
-      // get the current schema
-      case Some(s) => s.catalog.currentDatabase
-      case None => ""
-    }
+    val dbName =
+      if (dotIndex > 0) table.substring(0, dotIndex)
+      else if (!defaultDb.isEmpty) defaultDb
+      else session match {
+        // get the current database
+        case Some(s) => s.catalog.currentDatabase
+        case None => if (conn ne null) conn.getSchema else ""
+      }
     val tableName = if (dotIndex > 0) table.substring(dotIndex + 1) else table
     // hive meta-store is case-insensitive so convert to upper-case for snappy-store
-    if (forSpark) {
-      (if (schemaName.isEmpty) "" else toLowerCase(schemaName)) -> toLowerCase(tableName)
-    }
-    else (if (schemaName.isEmpty) "" else toUpperCase(schemaName)) -> toUpperCase(tableName)
+    if (forSpark eq null) {
+      (if (dbName.isEmpty) "" else dbName) -> tableName
+    } else if (forSpark.booleanValue()) {
+      (if (dbName.isEmpty) "" else toLowerCase(dbName)) -> toLowerCase(tableName)
+    } else (if (dbName.isEmpty) "" else toUpperCase(dbName)) -> toUpperCase(tableName)
   }
 
-  private def getTableMetadataResultSet(schemaName: String, tableName: String,
+  private def getTableMetadataResultSet(dbName: String, tableName: String,
       conn: Connection): ResultSet = {
     // using the JDBC meta-data API
-    conn.getMetaData.getTables(null, schemaName, tableName, null)
+    conn.getMetaData.getTables(null, dbName, tableName, null)
   }
 
   private lazy val getCatalystTypeMethod: Method = {
@@ -242,9 +241,9 @@ object JdbcExtendedUtils extends Logging {
         typeId == Types.NUMERIC || typeId == Types.REAL || typeId == Types.DOUBLE
   }
 
-  def getTableSchema(schemaName: String, tableName: String, conn: Connection,
+  def getTableDatabase(dbName: String, tableName: String, conn: Connection,
       session: Option[SparkSession]): StructType = {
-    val rs = conn.getMetaData.getColumns(null, toUpperCase(schemaName),
+    val rs = conn.getMetaData.getColumns(null, toUpperCase(dbName),
       toUpperCase(tableName), null)
     if (rs.next()) {
       val cols = new mutable.ArrayBuffer[StructField]()
@@ -275,11 +274,11 @@ object JdbcExtendedUtils extends Logging {
     }
   }
 
-  def tableExistsInMetaData(schemaName: String, tableName: String,
+  def tableExistsInMetaData(dbName: String, tableName: String,
       conn: Connection, skipType: String = ""): Boolean = {
     try {
       // using the JDBC meta-data API
-      val rs = getTableMetadataResultSet(toUpperCase(schemaName), toUpperCase(tableName), conn)
+      val rs = getTableMetadataResultSet(toUpperCase(dbName), toUpperCase(tableName), conn)
       if (skipType.isEmpty) {
         rs.next()
       } else {
@@ -293,14 +292,6 @@ object JdbcExtendedUtils extends Logging {
     }
   }
 
-  def createSchema(schemaName: String, conn: Connection,
-      dialect: JdbcDialect): Unit = {
-    dialect match {
-      case d: JdbcExtendedDialect => d.createSchema(schemaName, conn)
-      case _ => // ignore
-    }
-  }
-
   /**
    * Returns true if the table already exists in the JDBC database.
    */
@@ -311,8 +302,8 @@ object JdbcExtendedUtils extends Logging {
 
       case _ =>
         try {
-          val (schemaName, tableName) = getTableWithSchema(table, conn, None)
-          tableExistsInMetaData(schemaName, tableName, conn)
+          val (dbName, tableName) = getTableWithDatabase(table, conn)
+          tableExistsInMetaData(dbName, tableName, conn)
         } catch {
           case NonFatal(_) =>
             val stmt = conn.createStatement()
@@ -339,11 +330,10 @@ object JdbcExtendedUtils extends Logging {
     }
   }
 
-  def isRowLevelSecurityEnabled(table: String, conn: Connection, dialect: JdbcDialect,
-      context: SQLContext): Boolean = {
-    val (schemaName, tableName) = getTableWithSchema(table, conn, None, forSpark = false)
+  def isRowLevelSecurityEnabled(table: String, conn: Connection): Boolean = {
+    val (dbName, tableName) = getTableWithDatabase(table, conn, forSpark = java.lang.Boolean.FALSE)
     val q = s"select 1 from sys.systables s where s.tablename = '$tableName' and " +
-        s" s.tableschemaname = '$schemaName' and s.rowlevelsecurityenabled = true "
+        s" s.tableschemaname = '$dbName' and s.rowlevelsecurityenabled = true "
     conn.createStatement().executeQuery(q).next()
   }
 
@@ -368,23 +358,15 @@ object JdbcExtendedUtils extends Logging {
     }
   }
 
-  /** get the table name in SQL quoted form e.g. "APP"."TABLE1" */
-  def quotedName(table: String, escapeQuotes: Boolean = false): String = {
+  /** get the table name in SQL quoted form e.g. `APP`.`TABLE1` */
+  def quotedName(table: String): String = {
     // always expect fully qualified name
-    val (schema, tableName) = getTableWithSchema(table, conn = null, None, forSpark = false)
-    if (escapeQuotes) {
-      val sb = new java.lang.StringBuilder(schema.length + tableName.length + 9)
-      if (!schema.isEmpty) {
-        sb.append("\\\"").append(schema).append("\\\".")
-      }
-      sb.append("\\\"").append(tableName).append("\\\"").toString
-    } else {
-      val sb = new java.lang.StringBuilder(schema.length + tableName.length + 5)
-      if (!schema.isEmpty) {
-        sb.append('"').append(schema).append("\".")
-      }
-      sb.append('"').append(tableName).append('"').toString
+    val (db, tableName) = getTableWithDatabase(table, forSpark = java.lang.Boolean.FALSE)
+    val sb = new java.lang.StringBuilder(db.length + tableName.length + 5)
+    if (!db.isEmpty) {
+      sb.append('`').append(db).append("`.")
     }
+    sb.append('`').append(tableName).append('`').toString
   }
 
   def toLowerCase(k: String): String = k.toLowerCase(java.util.Locale.ENGLISH)
@@ -394,10 +376,9 @@ object JdbcExtendedUtils extends Logging {
   /**
    * Returns the SQL for prepare to insert or put rows into a table.
    */
-  def getInsertOrPutString(table: String, rddSchema: StructType,
-      putInto: Boolean, escapeQuotes: Boolean = false): String = {
+  def getInsertOrPutString(table: String, rddSchema: StructType, putInto: Boolean): String = {
     val sql = new StringBuilder()
-    val tableName = quotedName(table, escapeQuotes)
+    val tableName = quotedName(table)
     if (putInto) {
       sql.append("PUT INTO ").append(tableName).append(" (")
     } else {
@@ -406,11 +387,7 @@ object JdbcExtendedUtils extends Logging {
     var fieldsLeft = rddSchema.fields.length
     rddSchema.fields.foreach { field =>
       val columnName = toUpperCase(field.name)
-      if (escapeQuotes) {
-        sql.append("""\"""").append(columnName).append("""\"""")
-      } else {
-        sql.append('"').append(columnName).append('"')
-      }
+      sql.append('`').append(columnName).append('`')
       if (fieldsLeft > 1) sql.append(',') else sql.append(')')
       fieldsLeft -= 1
     }
@@ -428,14 +405,10 @@ object JdbcExtendedUtils extends Logging {
    * Returns the SQL for creating the WHERE clause for a set of columns.
    */
   def fillColumnsClause(sql: StringBuilder, fields: Seq[String],
-      escapeQuotes: Boolean = false, separator: String = " AND "): Unit = {
+      separator: String = " AND "): Unit = {
     var fieldsLeft = fields.length
     fields.foreach { field =>
-      if (escapeQuotes) {
-        sql.append("""\"""").append(toUpperCase(field)).append("""\"""")
-      } else {
-        sql.append('"').append(toUpperCase(field)).append('"')
-      }
+      sql.append('`').append(toUpperCase(field)).append('`')
       sql.append("=?")
       if (fieldsLeft > 1) sql.append(separator)
       fieldsLeft -= 1

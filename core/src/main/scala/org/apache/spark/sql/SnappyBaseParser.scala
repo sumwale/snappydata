@@ -17,6 +17,7 @@
 package org.apache.spark.sql
 
 import com.gemstone.gemfire.internal.shared.SystemProperties
+import com.pivotal.gemfirexd.internal.shared.common.reference.Limits.{DB2_VARCHAR_MAXWIDTH => VARCHAR_MAXWIDTH}
 import io.snappydata.{Constant, QueryHint}
 import org.eclipse.collections.impl.map.mutable.UnifiedMap
 import org.eclipse.collections.impl.set.mutable.UnifiedSet
@@ -159,6 +160,10 @@ abstract class SnappyBaseParser extends Parser() {
 
   final def keyword(k: Keyword): Rule0 = rule {
     atomic(ignoreCase(k.lower)) ~ delimiter
+  }
+
+  final def keywords(k1: Keyword, k2: Keyword): Rule0 = rule {
+    atomic(ignoreCase(k1.lower) | ignoreCase(k2.lower)) ~ delimiter
   }
 
   /**
@@ -339,7 +344,8 @@ abstract class SnappyBaseParser extends Parser() {
   }
 
   protected final def columnCharType: Rule1[DataType] = rule {
-    VARCHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((d: String) => VarcharType(d.toInt)) |
+    VARCHAR ~ (O_PAREN ~ digits ~ C_PAREN).? ~> ((d: Any) => VarcharType(
+      d.asInstanceOf[Option[String]].getOrElse(VARCHAR_MAXWIDTH.toString).toInt)) |
     CHAR ~ O_PAREN ~ digits ~ C_PAREN ~> ((d: String) => CharType(d.toInt)) |
     STRING ~> (() => StringType) |
     CLOB ~> (() => VarcharType(Int.MaxValue))
@@ -479,7 +485,8 @@ object SnappyParserConsts {
     // rand() plans are not to be cached since each run should use different seed
     // and the Spark impls create the seed in constructor rather than in generated code
     "rand" -> Array.emptyIntArray, "randn" -> Array.emptyIntArray,
-    "like" -> Array(1), "rlike" -> Array(1), "approx_count_distinct" -> Array(1)))
+    "like" -> Array(1), "rlike" -> Array(1), "first_value" -> Array(1), "last_value" -> Array(1),
+    "sort_array" -> Array(1), "approx_count_distinct" -> Array(1)))
 
   /**
    * Registering a Keyword with this method marks it a reserved keyword,
@@ -516,6 +523,7 @@ object SnappyParserConsts {
 
   final val COLUMN_SOURCE = "column"
   final val ROW_SOURCE = "row"
+  final val OPLOG_SOURCE = "oplog"
   final val DEFAULT_SOURCE = ROW_SOURCE
 
   // reserved keywords
@@ -596,6 +604,7 @@ object SnappyParserConsts {
   final val CURRENT_USER: Keyword = nonReserved("current_user")
   final val DATABASE: Keyword = nonReserved("database", isKeyword = false)
   final val DATABASES: Keyword = nonReserved("databases", isKeyword = false)
+  final val DBPROPERTIES: Keyword = nonReserved("dbproperties", isKeyword = false)
   final val DELETE: Keyword = nonReserved("delete")
   final val DEPLOY: Keyword = nonReserved("deploy", isKeyword = false)
   final val DESC: Keyword = nonReserved("desc")
@@ -609,6 +618,7 @@ object SnappyParserConsts {
   final val DURATION: Keyword = nonReserved("duration")
   final val ENABLE: Keyword = nonReserved("enable")
   final val END: Keyword = nonReserved("end")
+  final val EXEC: Keyword = nonReserved("exec")
   final val EXECUTE: Keyword = nonReserved("execute")
   final val EXISTS: Keyword = nonReserved("exists")
   final val EXPLAIN: Keyword = nonReserved("explain")
@@ -671,6 +681,7 @@ object SnappyParserConsts {
   final val POSITION: Keyword = nonReserved("position", isKeyword = false)
   final val PRECEDING: Keyword = nonReserved("preceding")
   final val PRIMARY: Keyword = nonReserved("primary", isKeyword = false)
+  final val PRIVILEGE: Keyword = nonReserved("privilege", isKeyword = false)
   final val PURGE: Keyword = nonReserved("purge", isKeyword = false)
   final val PUT: Keyword = nonReserved("put", isKeyword = false)
   final val RANGE: Keyword = nonReserved("range")
@@ -687,8 +698,9 @@ object SnappyParserConsts {
   final val ROLLUP: Keyword = nonReserved("rollup")
   final val ROW: Keyword = nonReserved("row")
   final val ROWS: Keyword = nonReserved("rows")
-  final val SCHEMA: Keyword = nonReserved("schema")
-  final val SCHEMAS: Keyword = nonReserved("schemas")
+  final val SCALA: Keyword = nonReserved("scala", isKeyword = false)
+  final val SCHEMA: Keyword = nonReserved("schema", isKeyword = false)
+  final val SCHEMAS: Keyword = nonReserved("schemas", isKeyword = false)
   final val SECURITY: Keyword = nonReserved("security", isKeyword = false)
   final val SEMI: Keyword = nonReserved("semi")
   final val SERDE: Keyword = nonReserved("serde", isKeyword = false)

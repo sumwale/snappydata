@@ -117,18 +117,18 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
 
   override def newSubqueryAlias(alias: String, child: LogicalPlan,
       view: Option[TableIdentifier]): LogicalPlan = view match {
-    case Some(v@TableIdentifier(table, schemaOpt)) =>
+    case Some(v@TableIdentifier(table, dbOpt)) =>
       if (!alias.equalsIgnoreCase(table)) {
         throw new AnalysisException(s"Conflicting alias and view: alias=$alias, view=$v")
       } else {
-        SubqueryAlias(AliasIdentifier(table, schemaOpt), child)
+        SubqueryAlias(AliasIdentifier(table, dbOpt), child)
       }
     case _ => SubqueryAlias(AliasIdentifier(alias, None), child)
   }
 
   override def getViewFromAlias(q: SubqueryAlias): Option[TableIdentifier] = q.name match {
     case AliasIdentifier(_, None) => None
-    case AliasIdentifier(id, schema) => Some(TableIdentifier(id, schema))
+    case AliasIdentifier(id, db) => Some(TableIdentifier(id, db))
   }
 
   override def newAlias(child: Expression, name: String, copyAlias: Option[NamedExpression],
@@ -310,159 +310,159 @@ class Spark24Internals(override val version: String) extends Spark23_4_Internals
 class SnappyEmbeddedHiveCatalog24(_conf: SparkConf, _hadoopConf: Configuration,
     _createTime: Long) extends SnappyHiveExternalCatalog(_conf, _hadoopConf, _createTime) {
 
-  override def getTable(schema: String, table: String): CatalogTable =
-    getTableImpl(schema, table)
+  override def getTable(db: String, table: String): CatalogTable =
+    getTableImpl(db, table)
 
-  override protected def baseCreateDatabase(schemaDefinition: CatalogDatabase,
-      ignoreIfExists: Boolean): Unit = super.createDatabase(schemaDefinition, ignoreIfExists)
+  override protected def baseCreateDatabase(dbDefinition: CatalogDatabase,
+      ignoreIfExists: Boolean): Unit = super.createDatabase(dbDefinition, ignoreIfExists)
 
-  override protected def baseDropDatabase(schema: String, ignoreIfNotExists: Boolean,
-      cascade: Boolean): Unit = super.dropDatabase(schema, ignoreIfNotExists, cascade)
+  override protected def baseDropDatabase(db: String, ignoreIfNotExists: Boolean,
+      cascade: Boolean): Unit = super.dropDatabase(db, ignoreIfNotExists, cascade)
 
   override protected def baseCreateTable(tableDefinition: CatalogTable,
       ignoreIfExists: Boolean): Unit = super.createTable(tableDefinition, ignoreIfExists)
 
-  override protected def baseDropTable(schema: String, table: String, ignoreIfNotExists: Boolean,
-      purge: Boolean): Unit = super.dropTable(schema, table, ignoreIfNotExists, purge)
+  override protected def baseDropTable(db: String, table: String, ignoreIfNotExists: Boolean,
+      purge: Boolean): Unit = super.dropTable(db, table, ignoreIfNotExists, purge)
 
   override protected def baseAlterTable(tableDefinition: CatalogTable): Unit =
     super.alterTable(tableDefinition)
 
-  override protected def baseRenameTable(schema: String, oldName: String, newName: String): Unit =
-    super.renameTable(schema, oldName, newName)
+  override protected def baseRenameTable(db: String, oldName: String, newName: String): Unit =
+    super.renameTable(db, oldName, newName)
 
-  override protected def baseLoadDynamicPartitions(schema: String, table: String, loadPath: String,
+  override protected def baseLoadDynamicPartitions(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, replace: Boolean, numDP: Int, holdDDLTime: Boolean): Unit = {
-    super.loadDynamicPartitions(schema, table, loadPath, partition, replace, numDP)
+    super.loadDynamicPartitions(db, table, loadPath, partition, replace, numDP)
   }
 
-  override protected def baseCreateFunction(schema: String,
-      funcDefinition: CatalogFunction): Unit = super.createFunction(schema, funcDefinition)
+  override protected def baseCreateFunction(db: String,
+      funcDefinition: CatalogFunction): Unit = super.createFunction(db, funcDefinition)
 
-  override protected def baseDropFunction(schema: String, name: String): Unit =
-    super.dropFunction(schema, name)
+  override protected def baseDropFunction(db: String, name: String): Unit =
+    super.dropFunction(db, name)
 
-  override protected def baseRenameFunction(schema: String, oldName: String,
-      newName: String): Unit = super.renameFunction(schema, oldName, newName)
+  override protected def baseRenameFunction(db: String, oldName: String,
+      newName: String): Unit = super.renameFunction(db, oldName, newName)
 
-  override def createDatabase(schemaDefinition: CatalogDatabase,
-      ignoreIfExists: Boolean): Unit = createDatabaseImpl(schemaDefinition, ignoreIfExists)
+  override def createDatabase(dbDefinition: CatalogDatabase,
+      ignoreIfExists: Boolean): Unit = createDatabaseImpl(dbDefinition, ignoreIfExists)
 
-  override def dropDatabase(schema: String, ignoreIfNotExists: Boolean,
-      cascade: Boolean): Unit = dropDatabaseImpl(schema, ignoreIfNotExists, cascade)
+  override def dropDatabase(db: String, ignoreIfNotExists: Boolean,
+      cascade: Boolean): Unit = dropDatabaseImpl(db, ignoreIfNotExists, cascade)
 
-  override def alterDatabase(schemaDefinition: CatalogDatabase): Unit =
-    alterDatabaseImpl(schemaDefinition)
+  override def alterDatabase(dbDefinition: CatalogDatabase): Unit =
+    alterDatabaseImpl(dbDefinition)
 
   override def createTable(table: CatalogTable, ignoreIfExists: Boolean): Unit =
     createTableImpl(table, ignoreIfExists)
 
-  override def dropTable(schema: String, table: String, ignoreIfNotExists: Boolean,
-      purge: Boolean): Unit = dropTableImpl(schema, table, ignoreIfNotExists, purge)
+  override def dropTable(db: String, table: String, ignoreIfNotExists: Boolean,
+      purge: Boolean): Unit = dropTableImpl(db, table, ignoreIfNotExists, purge)
 
-  override def renameTable(schema: String, oldName: String, newName: String): Unit =
-    renameTableImpl(schema, oldName, newName)
+  override def renameTable(db: String, oldName: String, newName: String): Unit =
+    renameTableImpl(db, oldName, newName)
 
   override def alterTable(table: CatalogTable): Unit = alterTableImpl(table)
 
-  override def alterTableStats(schema: String, table: String,
+  override def alterTableStats(db: String, table: String,
       stats: Option[CatalogStatistics]): Unit = {
-    withHiveExceptionHandling(super.alterTableStats(schema, table, stats))
+    withHiveExceptionHandling(super.alterTableStats(db, table, stats))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def alterTableDataSchema(schema: String, table: String, newSchema: StructType): Unit = {
-    withHiveExceptionHandling(super.alterTableDataSchema(schema, table, newSchema))
+  override def alterTableDataSchema(db: String, table: String, newSchema: StructType): Unit = {
+    withHiveExceptionHandling(super.alterTableDataSchema(db, table, newSchema))
 
-    registerCatalogSchemaChange(schema -> table :: Nil)
+    registerCatalogSchemaChange(db -> table :: Nil)
   }
 
-  override def loadDynamicPartitions(schema: String, table: String, loadPath: String,
+  override def loadDynamicPartitions(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, replace: Boolean, numDP: Int): Unit = {
-    loadDynamicPartitionsImpl(schema, table, loadPath, partition, replace, numDP,
+    loadDynamicPartitionsImpl(db, table, loadPath, partition, replace, numDP,
       holdDDLTime = false)
   }
 
-  override def listPartitionsByFilter(schema: String, table: String, predicates: Seq[Expression],
+  override def listPartitionsByFilter(db: String, table: String, predicates: Seq[Expression],
       defaultTimeZoneId: String): Seq[CatalogTablePartition] = {
-    withHiveExceptionHandling(super.listPartitionsByFilter(schema, table,
+    withHiveExceptionHandling(super.listPartitionsByFilter(db, table,
       predicates, defaultTimeZoneId))
   }
 
-  override def createFunction(schema: String, function: CatalogFunction): Unit =
-    createFunctionImpl(schema, function)
+  override def createFunction(db: String, function: CatalogFunction): Unit =
+    createFunctionImpl(db, function)
 
-  override def dropFunction(schema: String, funcName: String): Unit =
-    dropFunctionImpl(schema, funcName)
+  override def dropFunction(db: String, funcName: String): Unit =
+    dropFunctionImpl(db, funcName)
 
-  override def alterFunction(schema: String, function: CatalogFunction): Unit = {
-    withHiveExceptionHandling(super.alterFunction(schema, function))
+  override def alterFunction(db: String, function: CatalogFunction): Unit = {
+    withHiveExceptionHandling(super.alterFunction(db, function))
     SnappySession.clearAllCache()
   }
 
-  override def renameFunction(schema: String, oldName: String, newName: String): Unit =
-    renameFunctionImpl(schema, oldName, newName)
+  override def renameFunction(db: String, oldName: String, newName: String): Unit =
+    renameFunctionImpl(db, oldName, newName)
 }
 
 class SmartConnectorExternalCatalog24(override val session: SparkSession)
     extends SmartConnectorExternalCatalog {
 
-  override def getTable(schema: String, table: String): CatalogTable =
-    getTableImpl(schema, table)
+  override def getTable(db: String, table: String): CatalogTable =
+    getTableImpl(db, table)
 
-  override def createDatabase(schemaDefinition: CatalogDatabase,
-      ignoreIfExists: Boolean): Unit = createDatabaseImpl(schemaDefinition, ignoreIfExists)
+  override def createDatabase(dbDefinition: CatalogDatabase,
+      ignoreIfExists: Boolean): Unit = createDatabaseImpl(dbDefinition, ignoreIfExists)
 
-  override def dropDatabase(schema: String, ignoreIfNotExists: Boolean,
-      cascade: Boolean): Unit = dropDatabaseImpl(schema, ignoreIfNotExists, cascade)
+  override def dropDatabase(db: String, ignoreIfNotExists: Boolean,
+      cascade: Boolean): Unit = dropDatabaseImpl(db, ignoreIfNotExists, cascade)
 
-  override def alterDatabase(schemaDefinition: CatalogDatabase): Unit =
-    throw new UnsupportedOperationException("Schema definitions cannot be altered")
+  override def alterDatabase(dbDefinition: CatalogDatabase): Unit =
+    throw new UnsupportedOperationException("Database definitions cannot be altered")
 
   override def createTable(table: CatalogTable, ignoreIfExists: Boolean): Unit =
     createTableImpl(table, ignoreIfExists)
 
-  override def dropTable(schema: String, table: String, ignoreIfNotExists: Boolean,
-      purge: Boolean): Unit = dropTableImpl(schema, table, ignoreIfNotExists, purge)
+  override def dropTable(db: String, table: String, ignoreIfNotExists: Boolean,
+      purge: Boolean): Unit = dropTableImpl(db, table, ignoreIfNotExists, purge)
 
-  override def renameTable(schema: String, oldName: String, newName: String): Unit =
-    renameTableImpl(schema, oldName, newName)
+  override def renameTable(db: String, oldName: String, newName: String): Unit =
+    renameTableImpl(db, oldName, newName)
 
   override def alterTable(table: CatalogTable): Unit = alterTableImpl(table)
 
-  override def alterTableDataSchema(schemaName: String, table: String,
-      newSchema: StructType): Unit = alterTableSchemaImpl(schemaName, table, newSchema)
+  override def alterTableDataSchema(dbName: String, table: String,
+      newSchema: StructType): Unit = alterTableSchemaImpl(dbName, table, newSchema)
 
-  override def alterTableStats(schema: String, table: String,
+  override def alterTableStats(db: String, table: String,
       stats: Option[CatalogStatistics]): Unit = stats match {
-    case None => alterTableStatsImpl(schema, table, None)
-    case Some(s) => alterTableStatsImpl(schema, table,
+    case None => alterTableStatsImpl(db, table, None)
+    case Some(s) => alterTableStatsImpl(db, table,
       Some((s.sizeInBytes, s.rowCount, s.colStats)))
   }
 
-  override def loadDynamicPartitions(schema: String, table: String, loadPath: String,
+  override def loadDynamicPartitions(db: String, table: String, loadPath: String,
       partition: TablePartitionSpec, replace: Boolean, numDP: Int): Unit = {
-    loadDynamicPartitionsImpl(schema, table, loadPath, partition, replace, numDP,
+    loadDynamicPartitionsImpl(db, table, loadPath, partition, replace, numDP,
       holdDDLTime = false)
   }
 
-  override def listPartitionsByFilter(schema: String, table: String, predicates: Seq[Expression],
+  override def listPartitionsByFilter(db: String, table: String, predicates: Seq[Expression],
       defaultTimeZoneId: String): Seq[CatalogTablePartition] = {
-    listPartitionsByFilterImpl(schema, table, predicates, defaultTimeZoneId)
+    listPartitionsByFilterImpl(db, table, predicates, defaultTimeZoneId)
   }
 
-  override def createFunction(schema: String, function: CatalogFunction): Unit =
-    createFunctionImpl(schema, function)
+  override def createFunction(db: String, function: CatalogFunction): Unit =
+    createFunctionImpl(db, function)
 
-  override def dropFunction(schema: String, funcName: String): Unit =
-    dropFunctionImpl(schema, funcName)
+  override def dropFunction(db: String, funcName: String): Unit =
+    dropFunctionImpl(db, funcName)
 
-  override def alterFunction(schema: String, function: CatalogFunction): Unit =
-    alterFunctionImpl(schema, function)
+  override def alterFunction(db: String, function: CatalogFunction): Unit =
+    alterFunctionImpl(db, function)
 
-  override def renameFunction(schema: String, oldName: String, newName: String): Unit =
-    renameFunctionImpl(schema, oldName, newName)
+  override def renameFunction(db: String, oldName: String, newName: String): Unit =
+    renameFunctionImpl(db, oldName, newName)
 }
 
 class SnappySessionCatalog24(override val snappySession: SnappySession,

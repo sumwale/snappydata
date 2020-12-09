@@ -69,7 +69,7 @@ case object SnappyDataPoolDialect extends SnappyDataBaseDialect with Logging {
               case None => conn.getSchema
               case Some(s) => s
             }
-            val metadata = JdbcExtendedUtils.getTableSchema(schemaName, tableName,
+            val metadata = JdbcExtendedUtils.getTableDatabase(schemaName, tableName,
               conn, Some(session))
             if (metadata.isEmpty) u
             else {

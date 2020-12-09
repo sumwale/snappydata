@@ -87,7 +87,7 @@ abstract case class JDBCMutableRelation(
   override final def resolvedName: String = table
 
   override val (schemaName: String, tableName: String) =
-    JdbcExtendedUtils.getTableWithSchema(table, conn = null, Some(sqlContext.sparkSession))
+    JdbcExtendedUtils.getTableWithDatabase(table, session = Some(sqlContext.sparkSession))
 
   private[sql] var tableCreated: Boolean = _
 
@@ -143,7 +143,7 @@ abstract case class JDBCMutableRelation(
   final lazy val rowInsertStr: String = JdbcExtendedUtils.getInsertOrPutString(
     table, schema, putInto = false)
 
-  override def getInsertPlan(relation: LogicalRelation,
+  override def getBasicInsertPlan(relation: LogicalRelation,
       child: SparkPlan): SparkPlan = {
     RowInsertExec(child, putInto = false, partitionColumns,
       partitionExpressions(relation), numBuckets, isPartitioned, schema, Some(this),

@@ -98,8 +98,15 @@ abstract class ColumnDecoder(columnDataRef: AnyRef, startCursor: Long,
 
   /**
    * Fetch next null position and return it as returned by [[getNextNullPosition]].
+   *
+   * The last argument is actually a dummy one used as a convenience in the generated
+   * code to increment a local variable as part of a relatively complex if statement
+   * sub-clause for best performance in java code. For C/C++ code one could instead
+   * have used a comma operator instead e.g. if (... && (numNulls++, ...)).
+   * See `ColumnTableScan.genIfNonNullCode` for the generated code. Implementations
+   * should never use the argument and other direct callers can pass any random value.
    */
-  def findNextNullPosition(columnBytes: AnyRef, nextNullPosition: Int, num: Int): Int
+  def findNextNullPosition(columnBytes: AnyRef, nextNullPosition: Int, dummy: Int): Int
 
   /**
    * Return the number of nulls till given ordinal given previous result.
@@ -1053,7 +1060,7 @@ trait NotNullDecoder extends ColumnDecoder {
   override final def getNextNullPosition: Int = Int.MaxValue
 
   override final def findNextNullPosition(columnBytes: AnyRef, nextNullPosition: Int,
-      num: Int): Int = Int.MaxValue
+      dummy: Int): Int = Int.MaxValue
 
   override final def numNulls(columnBytes: AnyRef, ordinal: Int, num: Int): Int = 0
 
@@ -1102,7 +1109,7 @@ trait NullableDecoder extends ColumnDecoder {
   override final def getNextNullPosition: Int = nextNullPosition
 
   override final def findNextNullPosition(columnBytes: AnyRef, nextNullPosition: Int,
-      num: Int): Int = {
+      dummy: Int): Int = {
     this.nextNullPosition = BitSet.nextSetBit(columnBytes, dataCursor,
       nextNullPosition + 1, numNullWords)
     this.nextNullPosition

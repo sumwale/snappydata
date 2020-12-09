@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution
 import scala.collection.mutable.ArrayBuffer
 
 import com.gemstone.gemfire.internal.cache.LocalRegion
+import io.snappydata.Property
 
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.{RDD, ZippedPartitionsBaseRDD}
@@ -30,11 +31,11 @@ import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.columnar.impl.{BaseColumnFormatRelation, ColumnarStorePartitionedRDD, IndexColumnFormatRelation, SmartConnectorColumnRDD}
-import org.apache.spark.sql.execution.columnar.{ColumnPutIntoExec, ConnectionType}
+import org.apache.spark.sql.execution.columnar.{ColumnInsertExec, ColumnPutIntoExec, ConnectionType}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetricInfo, SQLMetrics}
-import org.apache.spark.sql.execution.row.{RowFormatRelation, RowFormatScanRDD}
+import org.apache.spark.sql.execution.row.{RowFormatRelation, RowFormatScanRDD, RowInsertExec}
 import org.apache.spark.sql.sources.{BaseRelation, PrunedUnsafeFilteredScan, SamplingRelation}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{AnalysisException, CachedDataFrame, SnappySession, SparkSupport}
@@ -260,8 +261,16 @@ case class ExecutePlan(relation: LogicalRelation,
 
   protected[sql] lazy val sideEffectResult: Array[InternalRow] = {
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
+    val sc = session.sparkContext
+    // Insert operations should use the configured value for retries
+    // (e.g. can be disabled via the session property)
+    child.collectFirst {
+      case _: ColumnInsertExec | _: RowInsertExec =>
+        sc.setLocalProperty(Property.MaxRetryAttemptsForWrite.name,
+          Property.MaxRetryAttemptsForWrite.get(session.sessionState.conf).toString)
+    }
+
     try {
-      val sc = session.sparkContext
       val key = session.currentKey
       val oldExecutionId = sc.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
       val (result, shuffleIds) = if (oldExecutionId eq null) {
@@ -306,8 +315,8 @@ case class ExecutePlan(relation: LogicalRelation,
 
       result
     } finally {
-      logDebug(s" Unlocking the table in execute of ExecutePlan:" +
-          s" ${child.treeString(verbose = false)}")
+      logDebug(s"Unlocking table in execute of ExecutePlan: ${child.treeString(verbose = false)}")
+      sc.setLocalProperty(Property.MaxRetryAttemptsForWrite.name, null)
       session.clearWriteLockOnTable()
     }
   }
@@ -337,6 +346,8 @@ trait PartitionedDataSourceScan extends PrunedUnsafeFilteredScan {
   def partitionColumns: Seq[String]
 
   def connectionType: ConnectionType.Value
+
+  def getColocatedTable: Option[String]
 }
 
 /** Combines two SparkPlan or one SparkPlan and another RDD and acts as a LeafExecNode for the

@@ -16,8 +16,6 @@
  */
 package org.apache.spark.sql.store
 
-import java.util.regex.Pattern
-
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
@@ -102,12 +100,7 @@ object StoreUtils {
 
   val ROWID_COLUMN_NAME = "SNAPPYDATA_INTERNAL_ROWID"
 
-  val ROWID_COLUMN_FIELD = StructField("SNAPPYDATA_INTERNAL_ROWID", LongType, nullable = false)
-
   val ROWID_COLUMN_DEFINITION = s"$ROWID_COLUMN_NAME bigint generated always as identity"
-
-  val PRIMARY_KEY_PATTERN: Pattern = Pattern.compile("\\WPRIMARY\\s+KEY\\W",
-    Pattern.CASE_INSENSITIVE | Pattern.DOTALL)
 
   /** for testing only (a long convoluted name chosen deliberately) */
   var TEST_RANDOM_BUCKETID_ASSIGNMENT: Boolean = SystemProperties.getServerInstance.getBoolean(
@@ -178,13 +171,12 @@ object StoreUtils {
     distMembers.asScala
   }
 
-  private[sql] def getPartitionsPartitionedTable(session: SnappySession,
-      region: PartitionedRegion, linkBucketsToPartitions: Boolean,
-      preferPrimaries: Boolean): Array[Partition] = {
+  private[sql] def getPartitionsPartitionedTable(region: PartitionedRegion,
+      linkBucketsToPartitions: Boolean, preferPrimaries: Boolean): Array[Partition] = {
 
     val callbacks = ToolsCallbackInit.toolsCallback
     if (!linkBucketsToPartitions && callbacks != null && !TEST_RANDOM_BUCKETID_ASSIGNMENT) {
-      allocateBucketsToPartitions(session, region, preferPrimaries)
+      allocateBucketsToPartitions(region, preferPrimaries)
     } else {
       val numPartitions = region.getTotalNumberOfBuckets
 
@@ -218,8 +210,8 @@ object StoreUtils {
     partitions
   }
 
-  private def allocateBucketsToPartitions(session: SnappySession,
-      region: PartitionedRegion, preferPrimaries: Boolean): Array[Partition] = {
+  private def allocateBucketsToPartitions(region: PartitionedRegion,
+      preferPrimaries: Boolean): Array[Partition] = {
 
     val numTotalBuckets = region.getTotalNumberOfBuckets
     val serverToBuckets = new UnifiedMap[InternalDistributedMember,

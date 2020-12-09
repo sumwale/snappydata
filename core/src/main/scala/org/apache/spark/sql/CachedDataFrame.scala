@@ -686,38 +686,34 @@ object CachedDataFrame
     val sc = snappySession.sparkContext
     val localProperties = sc.getLocalProperties
     val oldExecutionId = localProperties.getProperty(SQLExecution.EXECUTION_ID_KEY)
-    if (oldExecutionId eq null) {
-      // If the execution ID is set in the CDF that means the plan execution has already
-      // been done. Use the same execution ID to link this execution to the previous one.
-      val executionId = if (currentExecutionId >= 0) currentExecutionId
-      else Utils.nextExecutionIdMethod.invoke(SQLExecution).asInstanceOf[Long]
-      val executionIdStr = java.lang.Long.toString(executionId)
-      SnappySession.setExecutionProperties(localProperties, executionIdStr, queryLongForm)
+    // If the execution ID is set in the CDF that means the plan execution has already
+    // been done. Use the same execution ID to link this execution to the previous one.
+    val executionId = if (currentExecutionId >= 0) currentExecutionId
+    else Utils.nextExecutionIdMethod.invoke(SQLExecution).asInstanceOf[Long]
+    val executionIdStr = java.lang.Long.toString(executionId)
+    val jobGroupId = snappySession.snappySessionState.jdbcQueryJobGroupId(executionIdStr)
+    SnappySession.setExecutionProperties(localProperties, executionIdStr,
+      jobGroupId, queryLongForm)
 
-      // adjust the planning time in the start time
-      val startTime = System.currentTimeMillis() - planningTime
-      var endTime = -1L
+    // adjust the planning time in the start time
+    val startTime = System.currentTimeMillis() - planningTime
+    var endTime = -1L
+    try {
+      if (postGUIPlans) sc.listenerBus.post(SparkListenerSQLExecutionStart(executionId,
+        queryShortForm, queryLongForm, queryExecutionStr, queryPlanInfo, startTime))
+      val result = body
+      endTime = System.currentTimeMillis()
+      (result, endTime - startTime)
+    } finally {
       try {
-        if (postGUIPlans) sc.listenerBus.post(SparkListenerSQLExecutionStart(executionId,
-          queryShortForm, queryLongForm, queryExecutionStr, queryPlanInfo, startTime))
-        val result = body
-        endTime = System.currentTimeMillis()
-        (result, endTime - startTime)
+        if (endTime == -1L) endTime = System.currentTimeMillis()
+        // add the time of plan execution to the end time.
+        if (postGUIPlans) sc.listenerBus.post(SparkListenerSQLExecutionEnd(executionId, endTime))
       } finally {
-        try {
-          if (endTime == -1L) endTime = System.currentTimeMillis()
-          // add the time of plan execution to the end time.
-          if (postGUIPlans) sc.listenerBus.post(SparkListenerSQLExecutionEnd(executionId, endTime))
-        } finally {
-          SnappySession.cleanupBroadcasts(executedPlan, blocking = false)
-          snappySession.snappySessionState.clearExecutionData()
-          SnappySession.clearExecutionProperties(localProperties)
-        }
+        SnappySession.clearExecutionProperties(localProperties, oldExecutionId)
+        SnappySession.cleanupBroadcasts(executedPlan, blocking = false)
+        snappySession.snappySessionState.clearExecutionData()
       }
-    } else {
-      // Don't support nested `withNewExecutionId`.
-      throw new IllegalArgumentException(
-        s"${SQLExecution.EXECUTION_ID_KEY} is already set to $oldExecutionId")
     }
   }
 

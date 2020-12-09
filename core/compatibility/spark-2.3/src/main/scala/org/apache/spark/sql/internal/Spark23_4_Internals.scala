@@ -21,7 +21,8 @@ import java.lang.reflect.{Field, Method}
 import scala.collection.mutable
 
 import io.snappydata.sql.catalog.SnappyExternalCatalog
-import io.snappydata.{HintName, Property, QueryHint}
+import io.snappydata.{HintName, QueryHint}
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkContext
 import org.apache.spark.deploy.SparkSubmitUtils
@@ -52,7 +53,7 @@ import org.apache.spark.sql.execution.streaming.BaseStreamingSink
 import org.apache.spark.sql.execution.ui.{SQLAppStatusListener, SQLAppStatusStore, SnappySQLAppListener}
 import org.apache.spark.sql.hive._
 import org.apache.spark.sql.sources.{BaseRelation, Filter, JdbcExtendedUtils, ResolveQueryHints}
-import org.apache.spark.sql.streaming.{LogicalDStreamPlan, OutputMode, StreamingQuery, StreamingQueryManager, Trigger}
+import org.apache.spark.sql.streaming.{LogicalDStreamPlan, OutputMode, SnappyStreamingQueryManager, StreamingQuery, StreamingQueryManager, Trigger}
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.status.ElementTrackingStore
 import org.apache.spark.status.api.v1.RDDStorageInfo
@@ -165,9 +166,9 @@ abstract class Spark23_4_Internals extends SparkInternals {
     // replace inside SQLAppStatusStore as well as change on the Spark ListenerBus
     state.statusStore.listener match {
       case Some(_: SnappySQLAppListener) => // already changed
-      case _ =>
+      case l =>
         val newListener = new SnappySQLAppListener(sc.conf,
-          sc.statusStore.store.asInstanceOf[ElementTrackingStore])
+          sc.statusStore.store.asInstanceOf[ElementTrackingStore], l)
         // update on ListenerBus
         sc.listenerBus.findListenersByClass[SQLAppStatusListener]().foreach(
           sc.removeSparkListener)
@@ -359,6 +360,10 @@ abstract class Spark23_4_Internals extends SparkInternals {
       rdd, relation, tableIdentifier)
   }
 
+  override def tableIdentifier(scan: DataSourceScanExec): Option[TableIdentifier] = {
+    scan.tableIdentifier
+  }
+
   override def newCodegenSparkFallback(child: SparkPlan,
       session: SnappySession): CodegenSparkFallback = {
     new CodegenSparkFallback23(child, session)
@@ -417,7 +422,7 @@ abstract class Spark23_4_Internals extends SparkInternals {
   override def catalogStorageFormatLocationUri(
       storageFormat: CatalogStorageFormat): Option[String] = storageFormat.locationUri match {
     case None => None
-    case Some(uri) => Some(uri.toString)
+    case Some(uri) => Some(new Path(uri).toString)
   }
 
   override def catalogTablePartitionToRow(partition: CatalogTablePartition,
@@ -567,7 +572,7 @@ trait SnappySessionCatalog23_4 extends SessionCatalog with SnappySessionCatalog 
       CatalogTable.VIEW_QUERY_OUTPUT_PREFIX))), output = table.schema.toAttributes, child)
   }
 
-  override def newCatalogRelation(schemaName: String, table: CatalogTable): LogicalPlan =
+  override def newCatalogRelation(dbName: String, table: CatalogTable): LogicalPlan =
     UnresolvedCatalogRelation(table)
 
   override def lookupRelation(name: TableIdentifier): LogicalPlan = lookupRelationImpl(name, None)
@@ -649,7 +654,7 @@ abstract class SnappySessionStateBuilder23_4(session: SnappySession,
   }
 
   override protected def streamingQueryManager: StreamingQueryManager = {
-    new StreamingQueryManager(session) {
+    new SnappyStreamingQueryManager(session) {
 
       override private[sql] def startQuery(userSpecifiedName: Option[String],
           userSpecifiedCheckpointLocation: Option[String], df: DataFrame,
@@ -657,12 +662,7 @@ abstract class SnappySessionStateBuilder23_4(session: SnappySession,
           useTempCheckpointLocation: Boolean, recoverFromCheckpointLocation: Boolean,
           trigger: Trigger, triggerClock: Clock): StreamingQuery = {
 
-        session.snappySessionState.initSnappyStrategies
-        // Disabling `SnappyAggregateStrategy` for streaming queries as it clashes with
-        // `StatefulAggregationStrategy` which is applied by spark for streaming queries. This
-        // implies that Snappydata aggregation optimisation will be turned off for any usage of
-        // this session including non-streaming queries.
-        Property.HashAggregateSize.set(conf, "-1")
+        checkStartQuery(sink)
         super.startQuery(userSpecifiedName, userSpecifiedCheckpointLocation, df,
           extraOptions, sink, outputMode, useTempCheckpointLocation,
           recoverFromCheckpointLocation, trigger, triggerClock)

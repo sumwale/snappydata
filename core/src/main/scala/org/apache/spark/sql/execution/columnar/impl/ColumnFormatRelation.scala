@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.columnar.ExternalStoreUtils.CaseInsensitiv
 import org.apache.spark.sql.execution.columnar._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.row.RowFormatScanRDD
-import org.apache.spark.sql.execution.{ConnectionPool, PartitionedDataSourceScan, RefreshMetadata, SparkPlan}
+import org.apache.spark.sql.execution.{BucketsBasedIterator, ConnectionPool, PartitionedDataSourceScan, RefreshMetadata, SparkPlan}
 import org.apache.spark.sql.internal.ColumnTableBulkOps
 import org.apache.spark.sql.sources.JdbcExtendedUtils.quotedName
 import org.apache.spark.sql.sources._
@@ -87,7 +87,7 @@ abstract class BaseColumnFormatRelation(
     resolvedName, schema, putInto = false)
 
   override lazy val (schemaName: String, tableName: String) =
-    JdbcExtendedUtils.getTableWithSchema(table, conn = null, Some(sqlContext.sparkSession))
+    JdbcExtendedUtils.getTableWithDatabase(table, session = Some(sqlContext.sparkSession))
 
   if (_relationInfo eq null) {
     refreshTableSchema(invalidateCached = false, fetchFromStore = false)
@@ -144,11 +144,10 @@ abstract class BaseColumnFormatRelation(
     } else columns
     val zipped = buildRowBufferRDD(partitionEvaluator, rowBufferColumns, filters,
       useResultSet = true, projection).zipPartitions(rdd) { (leftItr, rightItr) =>
-      Iterator[Any](leftItr, rightItr)
+      BucketsBasedIterator(leftItr, rightItr)
     }
     (zipped, Nil)
   }
-
 
   def buildUnsafeScanForSampledRelation(requiredColumns: Array[String],
       filters: Array[Expression]): (RDD[Any], RDD[Any],
@@ -205,7 +204,7 @@ abstract class BaseColumnFormatRelation(
             s"""Cannot resolve column "$colName" among (${relation.output})""")))
   }
 
-  override def getInsertPlan(relation: LogicalRelation,
+  override def getBasicInsertPlan(relation: LogicalRelation,
       child: SparkPlan): SparkPlan = {
     withTableWriteLock() { () =>
       new ColumnInsertExec(child, partitionColumns, partitionExpressions(relation),
@@ -499,6 +498,8 @@ class ColumnFormatRelation(
 
   val tableOptions = new CaseInsensitiveMutableHashMap(_origOptions)
 
+  def getColocatedTable: Option[String] = tableOptions.get(StoreUtils.COLOCATE_WITH)
+
   override def withKeyColumns(relation: LogicalRelation,
       keyColumns: Seq[String]): LogicalRelation = {
     // keyColumns should match the key fields required for update/delete
@@ -680,6 +681,8 @@ class IndexColumnFormatRelation(
 
   def baseTable: Option[String] = Some(baseTableName)
 
+  def getColocatedTable: Option[String] = None
+
   override def withKeyColumns(relation: LogicalRelation,
       keyColumns: Seq[String]): LogicalRelation = {
     val cr = relation.relation.asInstanceOf[IndexColumnFormatRelation]
@@ -712,8 +715,8 @@ object ColumnFormatRelation extends Logging with StoreCallback {
 
   final def columnBatchTableName(table: String,
       session: Option[SparkSession] = None): String = {
-    val (schema, tableName) = JdbcExtendedUtils.getTableWithSchema(
-      table, null, session, forSpark = false)
+    val (schema, tableName) = JdbcExtendedUtils.getTableWithDatabase(
+      table, conn = null, session, forSpark = java.lang.Boolean.FALSE)
     schema + '.' + Constant.SHADOW_SCHEMA_NAME_WITH_SEPARATOR +
         tableName + Constant.SHADOW_TABLE_SUFFIX
   }

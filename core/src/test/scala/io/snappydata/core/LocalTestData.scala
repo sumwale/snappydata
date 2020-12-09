@@ -36,9 +36,9 @@ case class Data1(pk: Int, sk: String)
 
 case class Data2(pk: Int, Year: Int)
 
-case class Data3(pk1: Int, sk: String , pk2 : Int)
+case class Data3(pk1: Int, sk: String, pk2: Int)
 
-case class Data4(sk: String , pk1: Int, pk2 : Int)
+case class Data4(sk: String, pk1: Int, pk2: Int)
 
 case class RefData(ref: Int, description: String)
 
@@ -57,7 +57,7 @@ case class TRIPDATA(
     PICKUP_LATITUDE: Double,
     DROPOFF_LONGITUDE: Double,
     DROPOFF_LATITUDE: Double
-    )
+)
 
 object FileCleaner {
 
@@ -70,8 +70,8 @@ object FileCleaner {
     deletePath("./metastore_db")
     deletePath("./warehouse")
     Path(".").walkFilter { f =>
-        f.name.startsWith("BACKUPGFXD-DEFAULT-DISKSTORE") ||
-        (f.name.startsWith("locator") && f.name.endsWith(".dat"))
+      f.name.startsWith("BACKUPGFXD-DEFAULT-DISKSTORE") ||
+          (f.name.startsWith("locator") && f.name.endsWith(".dat"))
     }.foreach(_.deleteRecursively())
     deletePath("./datadictionary")
   }
@@ -82,7 +82,7 @@ object LocalSparkConf {
 
   private val random = new Random()
 
-  def newConf(addOn: (SparkConf) => SparkConf = null): SparkConf = {
+  def newConf(addOn: SparkConf => SparkConf = null): SparkConf = {
     /**
      * Pls do not change the flag values of Property.TestDisableCodeGenFlag.name
      * and Property.UseOptimizedHashAggregateForSingleKey.name
@@ -94,8 +94,10 @@ object LocalSparkConf {
     val conf = new SparkConf()
         .setIfMissing("spark.master", "local[4]")
         .setIfMissing("spark.memory.debugFill", "true")
-        .set("snappydata.sql.planCaching", "true") // random.nextBoolean().toString)
-        .set(Property.TestDisableCodeGenFlag.name , "true")
+        .set("snappydata.sql.planCaching", random.nextBoolean().toString)
+        .set(Property.TestCodeSplitThresholdInSHA.name, "5")
+        .set(Property.TestCodeSplitFunctionParamsSizeInSHA.name, "2")
+        .set(Property.TestDisableCodeGenFlag.name, "true")
         .set(Property.UseOptimizedHashAggregateForSingleKey.name, "true")
         .setAppName(getClass.getName)
     if (addOn != null) {

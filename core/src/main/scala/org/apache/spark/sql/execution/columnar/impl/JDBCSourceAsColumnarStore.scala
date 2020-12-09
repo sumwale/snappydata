@@ -381,7 +381,7 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
    * batches for now.
    */
   private def doSnappyInsertOrPut(region: LocalRegion, batch: ColumnBatch,
-      batchId: Long, partitionId: Int, maxDeltaRows: Int, compressionCodecId: Int): Unit = {
+      batchId: Long, partitionId: Int, compressionCodecId: Int): Unit = {
     val deltaUpdate = batch.deltaIndexes ne null
     val statRowIndex = if (deltaUpdate) ColumnFormatEntry.DELTA_STATROW_COL_INDEX
     else ColumnFormatEntry.STATROW_COL_INDEX
@@ -431,8 +431,7 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
    * batches for now.
    */
   private def doGFXDInsertOrPut(columnTableName: String, batch: ColumnBatch,
-      batchId: Long, partitionId: Int, maxDeltaRows: Int,
-      compressionCodecId: Int): Connection => Unit = {
+      batchId: Long, partitionId: Int, compressionCodecId: Int): Connection => Unit = {
     {
       connection: Connection => {
         val deltaUpdate = batch.deltaIndexes ne null
@@ -542,7 +541,7 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
     connectionType match {
       case ConnectionType.Embedded =>
         new ColumnarStorePartitionedRDD(snappySession, tableName, projection,
-          filters, (filters eq null) || filters.length == 0, prunePartitions, this)
+          filters, (filters eq null) || filters.length == 0, prunePartitions)
       case _ =>
         // remove the url property from poolProps since that will be
         // partition-specific
@@ -550,8 +549,8 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
             (if (connProperties.hikariCP) "jdbcUrl" else "url")
 
         val catalog = snappySession.externalCatalog
-        val (rowSchema, rowTable) = JdbcExtendedUtils.getTableWithSchema(rowBuffer,
-          conn = null, Some(snappySession))
+        val (rowSchema, rowTable) = JdbcExtendedUtils.getTableWithDatabase(rowBuffer,
+          session = Some(snappySession))
         val relationInfo = catalog.getRelationInfo(rowSchema, rowTable, isRowTable = false)._1
         new SmartConnectorColumnRDD(snappySession, tableName, projection, filters,
           ConnectionProperties(connProperties.url,
@@ -580,13 +579,13 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
           // all other callers (ColumnFormatEncoder, BucketRegion) use the same
           val uuid = if (BucketRegion.isValidUUID(batchId)) batchId
           else region.getColocatedWithRegion.newUUID(false)
-          doSnappyInsertOrPut(region, batch, uuid, partitionId, maxDeltaRows, compressionCodecId)
+          doSnappyInsertOrPut(region, batch, uuid, partitionId, compressionCodecId)
 
         case _ =>
           // noinspection RedundantDefaultArgument
           tryExecute(tableName, closeOnSuccessOrFailure = false /* batch.deltaIndexes ne null */ ,
             onExecutor = true)(doGFXDInsertOrPut(columnTableName, batch, batchId, partitionId,
-            maxDeltaRows, compressionCodecId))(conn)
+            compressionCodecId))(conn)
       }
     }
   }
@@ -624,7 +623,8 @@ class JDBCSourceAsColumnarStore(private var _connProperties: ConnectionPropertie
       val iter = gen._1.generate(refs).asInstanceOf[BufferedRowIterator]
       // put the single ColumnBatch in the iterator read by generated code
       iter.init(partitionId, Array(Iterator[Any](new ResultSetTraversal(
-        conn = null, stmt = null, rs = null, context = null),
+        stmt = null, rs = null, context = null,
+        java.util.Collections.emptySet[Integer]()),
         ColumnBatchIterator(batch)).asInstanceOf[Iterator[InternalRow]]))
       // ignore the result which is the update count
       while (iter.hasNext) {
@@ -696,8 +696,7 @@ final class ColumnarStorePartitionedRDD(
     private var projection: Array[Int],
     @transient private[sql] val filters: Array[Expression],
     private[sql] var fullScan: Boolean,
-    @(transient @param) partitionPruner: () => Int,
-    @transient private val store: JDBCSourceAsColumnarStore)
+    @(transient @param) partitionPruner: () => Int)
     extends RDDKryo[Any](session.sparkContext, Nil) with KryoSerializable {
 
   private[this] var allPartitions: Array[Partition] = _
@@ -810,8 +809,7 @@ final class SmartConnectorColumnRDD(
       // fetch all the column blobs pushing down the filters
       val (statement, rs) = helper.prepareScan(conn, txId,
         tableName, projection, serializedFilters, part, catalogSchemaVersion)
-      itr = new ColumnBatchIteratorOnRS(conn, projection, statement, rs,
-        context, partitionId)
+      itr = new ColumnBatchIteratorOnRS(projection, statement, rs, context, partitionId)
     } finally {
       if (context ne null) {
         context.addTaskCompletionListener { _ =>

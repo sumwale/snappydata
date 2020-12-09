@@ -78,11 +78,6 @@ class SnappyConf(@transient val session: SnappySession)
    */
   @volatile private[this] var dynamicCpusPerTask: Int = _
 
-  // disable LogicalPlan cache since the ExternalCatalog implementations already have
-  // a large enough cache and this cache causes lot of trouble with stale data especially
-  // in smart connector mode which is already handled by SmartConnectorExternalCatalog
-  setConfString("spark.sql.filesourceTableRelationCacheSize", "0")
-
   SQLConf.SHUFFLE_PARTITIONS.defaultValue match {
     case Some(d) if (session ne null) && super.numShufflePartitions == d =>
       dynamicShufflePartitions = coreCountForShuffle
@@ -121,6 +116,8 @@ class SnappyConf(@transient val session: SnappySession)
          Property.HashJoinSize.name |
          Property.HashAggregateSize.name |
          Property.ForceLinkPartitionsToBuckets.name |
+         Property.TestCodeSplitFunctionParamsSizeInSHA.name |
+         Property.TestCodeSplitThresholdInSHA.name |
          Property.UseOptimzedHashAggregate.name |
          Property.UseOptimizedHashAggregateForSingleKey.name |
          Property.TestExplodeComplexDataTypeInSHA.name =>
@@ -173,7 +170,7 @@ class SnappyConf(@transient val session: SnappySession)
 
     case CATALOG_IMPLEMENTATION.key if !session.hiveInitializing =>
       val newValue = value match {
-        case Some(v) => session.isHiveSupportEnabled(v.toString)
+        case Some(v) => SnappySession.isHiveSupportEnabled(v.toString)
         case None => CATALOG_IMPLEMENTATION.defaultValueString == "hive"
       }
       // initialize hive session upfront

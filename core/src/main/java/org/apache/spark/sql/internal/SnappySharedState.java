@@ -18,6 +18,7 @@ package org.apache.spark.sql.internal;
 
 import com.pivotal.gemfirexd.internal.engine.Misc;
 import io.snappydata.sql.catalog.SnappyExternalCatalog;
+import org.apache.spark.SparkConf;
 import org.apache.spark.SparkContext;
 import org.apache.spark.sql.ClusterMode;
 import org.apache.spark.sql.SnappyContext;
@@ -51,7 +52,7 @@ public abstract class SnappySharedState extends SharedState {
 
   /**
    * An instance of ExternalCatalog implementation used for SnappyData in connector mode.
-   *
+   * <p>
    * Note that this is only to satisfy some calls like from globalTempViewManager that
    * require a global instance else all normal calls should use SnappySessionCatalog.
    */
@@ -68,7 +69,7 @@ public abstract class SnappySharedState extends SharedState {
   private static final String WAREHOUSE_DIR =
       StaticSQLConf.WAREHOUSE_PATH().key();
 
-  SnappySharedState(SparkContext sparkContext) {
+  SnappySharedState(final SparkContext sparkContext) {
     super(sparkContext);
 
     // avoid inheritance of activeSession
@@ -79,10 +80,18 @@ public abstract class SnappySharedState extends SharedState {
     if (clusterMode instanceof ThinClientConnectorMode) {
       this.embedCatalog = null;
     } else {
-      // ensure store catalog is initialized
-      Misc.getMemStoreBooting().getExistingExternalCatalog();
+      // store catalog is not initialized for leader in recovery mode until this point.
+      if (!Misc.getGemFireCache().isSnappyRecoveryMode()) {
+        // ensure store catalog is initialized
+        Misc.getMemStoreBooting().getExistingExternalCatalog();
+      }
       this.embedCatalog = HiveClientUtil$.MODULE$.getOrCreateExternalCatalog(
-          sparkContext, sparkContext.conf());
+          sparkContext, new scala.runtime.AbstractFunction0<SparkConf>() {
+            @Override
+            public SparkConf apply() {
+              return sparkContext.getConf();
+            }
+          });
     }
 
     this.initialized = true;

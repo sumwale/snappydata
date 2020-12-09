@@ -17,13 +17,14 @@
 
 package org.apache.spark.sql.internal
 
-import org.apache.spark.rdd.RDD
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.{EmptyRDD, RDD}
 import org.apache.spark.sql.SparkSupport
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, ExprId, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{HintInfo, LogicalPlan, ResolvedHint}
 import org.apache.spark.sql.execution.columnar.ColumnTableScan
-import org.apache.spark.sql.execution.row.RowTableScan
+import org.apache.spark.sql.execution.row.{RowFormatScanRDD, RowTableScan}
 import org.apache.spark.sql.execution.{PartitionedDataSourceScan, SparkPlan}
 import org.apache.spark.sql.types.StructType
 
@@ -83,8 +84,24 @@ final class RowTableScan23(output: Seq[Attribute], schema: StructType, dataRDD: 
       id += 1
       ar.withExprId(ExprId(id))
     }
-    new RowTableScan23(newOutput, schema, dataRDD = SparkSupport.internals.EMPTY_RDD,
-      numBuckets, partitionColumns = Nil, partitionColumnAliases = Nil,
-      table, baseRelation, caseSensitive = false)
+    val rdd = dataRDD match {
+      case rowRDD: RowFormatScanRDD =>
+        new RowFormatFiltersWrapperRDD(rowRDD.sparkContext, rowRDD.filters)
+      case _ => SparkSupport.internals.EMPTY_RDD
+    }
+    new RowTableScan23(newOutput, schema, dataRDD = rdd, numBuckets, partitionColumns = Nil,
+      partitionColumnAliases = Nil, table, baseRelation, caseSensitive = false)
+  }
+}
+
+private final class RowFormatFiltersWrapperRDD(sc: SparkContext,
+    private val filters: Array[Expression]) extends EmptyRDD[Any](sc) {
+
+  override def hashCode(): Int = 1148313427 + filters.length
+
+  override def equals(o: Any): Boolean = o match {
+    case rdd: RowFormatFiltersWrapperRDD =>
+      rdd.filters.length == filters.length && (rdd.filters.length == 0 ||
+          rdd.filters.indices.forall(i => rdd.filters(i).semanticEquals(filters(i))))
   }
 }

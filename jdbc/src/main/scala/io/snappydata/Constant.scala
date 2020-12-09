@@ -28,6 +28,8 @@ object Constant {
 
   val DEFAULT_EMBEDDED_URL = "jdbc:snappydata:"
 
+  val RECOVER_MODE_URL = "jdbc:derby:"
+
   val DEFAULT_THIN_CLIENT_URL = "jdbc:snappydata://"
 
   val POOLED_THIN_CLIENT_URL = "jdbc:snappydata:pool://"
@@ -35,6 +37,8 @@ object Constant {
   val SNAPPY_URL_PREFIX = "snappydata://"
 
   val JDBC_EMBEDDED_DRIVER = "io.snappydata.jdbc.EmbeddedDriver"
+
+  val JDBC_RECOVERYMODE_DRIVER = "org.apache.derby.jdbc.ClientDriver"
 
   val JDBC_CLIENT_DRIVER = "io.snappydata.jdbc.ClientDriver"
 
@@ -56,7 +60,7 @@ object Constant {
 
   val CONNECTION_PROPERTY: String = s"${PROPERTY_PREFIX}connection"
 
-  val DEFAULT_SCHEMA = "APP"
+  val DEFAULT_DATABASE = "APP"
 
   val DEFAULT_CONFIDENCE: Double = 0.95d
 
@@ -74,6 +78,7 @@ object Constant {
 
   val DEFAULT_USE_HIKARICP = false
 
+  val CALC_TABLE_SIZE_SERVICE_INTERVAL: String = PROPERTY_PREFIX + "calcTableSizeInterval"
   // Interval in ms  to run the SnappyAnalyticsService
   val DEFAULT_CALC_TABLE_SIZE_SERVICE_INTERVAL: Long = 5000
 
@@ -131,6 +136,8 @@ object Constant {
 
   val MAX_CHAR_SIZE = 254
 
+  val STRING_TYPE_AS = "string_type_as"
+
   /**
    * Limit the maximum number of rows in a column batch (applied before
    * ColumnBatchSize property).
@@ -151,6 +158,8 @@ object Constant {
 
   val CHANGEABLE_JAR_NAME = "SNAPPY_CHANGEABLE_JAR_NAME"
 
+  val REPL_OUTPUT_DIR = "REPL_OUTPUT_DIR"
+
   val SNAPPY_JOB_URL = "__SNAPPY_JOB_URL_"
 
   val RESERVOIR_AS_REGION = "spark.sql.aqp.reservoirAsRegion"
@@ -160,4 +169,14 @@ object Constant {
   val COMPLEX_TYPE_AS_JSON_HINT = "complexTypeAsJson"
 
   val COMPLEX_TYPE_AS_JSON_DEFAULT = true
+
+  val CLUSTER_ID = "__cluster_id__"
+
+  val MEMBER_ID_PREFIX = "__member_id__"
+
+  val EXTERNAL_TABLE_REGION_KEY_PREFIX = "##_EXTERNAL__GRANT__REVOKE_######"
+
+  val INTP_GRANT_REVOKE_KEY = "##_INTP__GRANT__REVOKE_##"
+
+  val RECOVERY_SHOW_TABLE_COUNTS = "snappydata.recovery.enableTableCountInUI"
 }

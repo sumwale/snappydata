@@ -16,8 +16,11 @@
  */
 package org.apache.spark.sql
 
+import java.sql.DriverManager
+
 import scala.util.control.NonFatal
 
+import com.pivotal.gemfirexd.TestUtil
 import io.snappydata.SnappyFunSuite
 
 import org.apache.spark.Logging
@@ -126,5 +129,30 @@ class MiscTest extends SnappyFunSuite with Logging {
       } catch {
         case _: AnalysisException => // expected ... ignore
       })
+  }
+
+  test("multiline json") {
+    val jsonFile: String = getClass.getResource("/multiline.json").getPath
+    // noinspection ScalaDeprecation
+    val df = snc.read.json(sc.wholeTextFiles(jsonFile).values)
+    df.collect()
+    val df1 = snc.read.option("wholefile", "true").json(jsonFile)
+    df1.collect()
+    val bakeryJsonFile: String = getClass.getResource("/bakery.json").getPath
+    snc.sql(s"create external table bakery_json using json options (path '$bakeryJsonFile')")
+    val rs = snc.sql("select * from bakery_json")
+    rs.collect()
+    snc.dropTable("bakery_json", ifExists = true)
+    val serverHostPort2 = TestUtil.startNetServer()
+    val conn = DriverManager.getConnection(s"jdbc:snappydata://$serverHostPort2")
+    val st = conn.createStatement
+    st.execute(s"create external table bakery_json using json options (path '$bakeryJsonFile')")
+    val results = st.executeQuery("select * from bakery_json")
+    while(results.next()) {
+      results.getString(3)
+    }
+    st.execute("drop table if exists bakery_json")
+    conn.close()
+    TestUtil.stopNetServer()
   }
 }

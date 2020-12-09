@@ -128,7 +128,7 @@ class TAQTestJob extends SnappySQLJob with Logging {
     Boolean.box(true)
   }
 
-  def runSnappyJob2(sc: SnappyContext, jobConfig: Config): Any = {
+  def runSnappyJob2(sc: SnappyContext): Any = {
     val numRuns = 1000
     val numIters = 1000
     val session = sc.snappySession
@@ -206,14 +206,14 @@ object TAQTest extends Logging with Assertions {
 
   private val d = "2016-06-06"
   // private val s = "SY23"
-  val cacheQueries2 = Array(
+  val cacheQueries2: Array[String] = Array(
     "select avg(bid) from cQuote",
     "select sym, avg(bid) from cQuote group by sym",
     "select sym, last(price) from cTrade group by sym",
     "select cQuote.sym, last(bid) from cQuote join cS " +
         s"on (cQuote.sym = cS.sym) where date='$d' group by cQuote.sym"
   )
-  val cacheQueries = Array(
+  val cacheQueries: Array[String] = Array(
     "select cQuote.sym, last(bid) from cQuote join cS " +
         s"on (cQuote.sym = cS.sym) where date='$d' group by cQuote.sym",
     "select cTrade.sym, ex, last(price) from cTrade join cS " +
@@ -227,14 +227,14 @@ object TAQTest extends Logging with Assertions {
         s"on q.time=(select max(time) from q where time<=t.time and sym='$s') " +
         "where price<bid" */
   )
-  val queries2 = Array(
+  val queries2: Array[String] = Array(
     "select avg(bid) from quote",
     "select sym, avg(bid) from quote group by sym",
     "select sym, last(price) from trade group by sym",
     "select quote.sym, last(bid) from quote join S " +
         s"on (quote.sym = S.sym) where date='$d' group by quote.sym"
   )
-  val queries = Array(
+  val queries: Array[String] = Array(
     "select quote.sym, last(bid) from quote join S " +
         s"on (quote.sym = S.sym) where date='$d' group by quote.sym",
     "select trade.sym, ex, last(price) from trade join S " +
@@ -248,7 +248,7 @@ object TAQTest extends Logging with Assertions {
         s"on q.time=(select max(time) from q where time<=t.time and sym='$s') " +
         "where price<bid" */
   )
-  val expectedResultSizes = Array(
+  val expectedResultSizes: Array[Int] = Array(
     100,
     900,
     800

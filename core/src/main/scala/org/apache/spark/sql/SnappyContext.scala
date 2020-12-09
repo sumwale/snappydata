@@ -18,10 +18,8 @@ package org.apache.spark.sql
 
 import java.io.{Externalizable, ObjectInput, ObjectOutput}
 import java.lang
-import java.util.Map.Entry
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
-import java.util.function.Consumer
 import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.JavaConverters._
@@ -52,11 +50,12 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
 import org.apache.spark.sql.catalyst.expressions.SortDirection
 import org.apache.spark.sql.collection.{ToolsCallbackInit, Utils}
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils.CaseInsensitiveMutableHashMap
+import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.joins.HashedObjectCache
 import org.apache.spark.sql.execution.ui.SQLTab
 import org.apache.spark.sql.execution.{ConnectionPool, DeployCommand, DeployJarCommand, RefreshMetadata}
 import org.apache.spark.sql.hive.{HiveSessionCatalog, SnappyHiveExternalCatalog, SnappySessionState}
-import org.apache.spark.sql.internal.{ContextJarUtils, SharedState, SnappySharedState, StaticSQLConf}
+import org.apache.spark.sql.internal.{SharedState, SnappySharedState, StaticSQLConf}
 import org.apache.spark.sql.store.CodeGeneration
 import org.apache.spark.sql.streaming._
 import org.apache.spark.sql.types.{StructField, StructType}
@@ -822,6 +821,8 @@ object SnappyContext extends SparkSupport with Logging {
 
   private lazy val builtinSources = new CaseInsensitiveMutableHashMap[
       (String, CatalogObjectType.Type)](Map(
+    ParserConsts.OPLOG_SOURCE ->
+        (classOf[execution.oplog.impl.DefaultSource].getCanonicalName -> CatalogObjectType.Oplog),
     ParserConsts.COLUMN_SOURCE ->
         (classOf[execution.columnar.impl.DefaultSource].getCanonicalName ->
             CatalogObjectType.Column),
@@ -1090,39 +1091,37 @@ object SnappyContext extends SparkSupport with Logging {
           if (ToolsCallbackInit.toolsCallback ne null) {
             SnappyContext.getClusterMode(sc) match {
               case _: SnappyEmbeddedMode =>
-                val deployCmds = ToolsCallbackInit.toolsCallback.getAllGlobalCmnds
-                if (deployCmds.length > 0) {
-                  logInfo(s"Deployed commands size = ${deployCmds.length}")
-                  val commandSet = ToolsCallbackInit.toolsCallback.getGlobalCmndsSet
-                  commandSet.forEach(new Consumer[Entry[String, String]] {
-                    override def accept(t: Entry[String, String]): Unit = {
-                      if (!t.getKey.startsWith(ContextJarUtils.functionKeyPrefix)) {
-                        val d = t.getValue
-                        val cmdFields = d.split('|') // split() removes empty elements
-                        if (d.contains('|')) {
-                          val coordinate = cmdFields(0)
-                          val repos = if (cmdFields.length > 1 && !cmdFields(1).isEmpty) {
-                            Some(cmdFields(1))
-                          } else None
-                          val cache = if (cmdFields.length > 2 && !cmdFields(2).isEmpty) {
-                            Some(cmdFields(2))
-                          } else None
-                          try {
-                            DeployCommand(coordinate, null, repos, cache, restart = true)
-                                .run(session)
-                          } catch {
-                            case e: Throwable => failOnJarUnavailability(t.getKey, Array.empty, e)
-                          }
-                        } else { // Jars we have
-                          try {
-                            DeployJarCommand(null, cmdFields(0), restart = true).run(session)
-                          } catch {
-                            case e: Throwable => failOnJarUnavailability(t.getKey, cmdFields, e)
-                          }
+                val deployCommands = ToolsCallbackInit.toolsCallback.getGlobalCommands()
+                if (deployCommands.nonEmpty) {
+                  logInfo(s"Deployed commands size = ${deployCommands.size}")
+                  deployCommands.foreach {
+                    case (alias, value: String) =>
+                      if (value.indexOf('|') != -1) {
+                        val cmdFields = value.split('|') // split() removes empty elements
+                        val coordinate = cmdFields(0)
+                        val repos = if (cmdFields.length > 1 && !cmdFields(1).isEmpty) {
+                          Some(cmdFields(1))
+                        } else None
+                        val cache = if (cmdFields.length > 2 && !cmdFields(2).isEmpty) {
+                          Some(cmdFields(2))
+                        } else None
+                        try {
+                          DeployCommand(coordinate, null, repos, cache, restart = true)
+                              .run(session)
+                        } catch {
+                          case e: Throwable =>
+                            failOnJarUnavailability(alias, Utils.EMPTY_STRING_ARRAY, e)
+                        }
+                      } else { // Jars we have
+                        try {
+                          DeployJarCommand(null, value, restart = true).run(session)
+                        } catch {
+                          case e: Throwable =>
+                            failOnJarUnavailability(alias, value.split(','), e)
                         }
                       }
-                    }
-                  })
+                    case _ =>
+                  }
                 }
               case _ => // Nothing
             }
@@ -1135,7 +1134,7 @@ object SnappyContext extends SparkSupport with Logging {
 
   private def failOnJarUnavailability(k: String, jars: Array[String], e: Throwable): Unit = {
     GemFireXDUtils.waitForNodeInitialization()
-    Misc.getMemStore.getGlobalCmdRgn.remove(k)
+    Misc.getMemStore.getMetadataCmdRgn.remove(k)
     if (!jars.isEmpty) {
       val mutable = new ArrayBuffer[String]()
       mutable += "__REMOVE_FILES_ONLY__"
@@ -1195,8 +1194,6 @@ object SnappyContext extends SparkSupport with Logging {
     newSession
   }
 
-  def hasHiveSession: Boolean = contextLock.synchronized(this.hiveSession ne null)
-
   def getHiveSharedState: Option[SharedState] = contextLock.synchronized {
     if (this.hiveSession ne null) Some(this.hiveSession.sharedState) else None
   }
@@ -1253,7 +1250,7 @@ object SnappyContext extends SparkSupport with Logging {
                 props
               case None => null
             }
-            ServiceUtils.invokeStopFabricServer(sc, props)
+            ServiceUtils.invokeStopFabricServer(props)
           }
       }
       // clear static objects on the driver
@@ -1306,7 +1303,8 @@ object SnappyContext extends SparkSupport with Logging {
   }
 
   def getProviderType(provider: String): CatalogObjectType.Type = {
-    builtinSources.collectFirst {
+    if (provider.equalsIgnoreCase(DDLUtils.HIVE_PROVIDER)) CatalogObjectType.Hive
+    else builtinSources.collectFirst {
       case (shortName, (className, providerType)) if provider.equalsIgnoreCase(className) ||
           provider.equalsIgnoreCase(shortName) => providerType
     } match {

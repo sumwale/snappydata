@@ -16,9 +16,10 @@
  */
 package org.apache.spark.sql
 
+import java.lang.reflect.InvocationTargetException
 import java.sql.{Connection, SQLException, SQLWarning}
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import java.util.{Calendar, Properties}
 
 import scala.collection.JavaConverters._
@@ -31,6 +32,7 @@ import scala.reflect.runtime.universe.{TypeTag, typeOf}
 import com.gemstone.gemfire.internal.cache.{GemFireCacheImpl, PartitionedRegion}
 import com.gemstone.gemfire.internal.shared.{ClientResolverUtils, FinalizeHolder, FinalizeObject}
 import com.google.common.cache.{Cache, CacheBuilder}
+import com.pivotal.gemfirexd.Attribute
 import com.pivotal.gemfirexd.internal.iapi.sql.ParameterValueSet
 import com.pivotal.gemfirexd.internal.iapi.{types => stypes}
 import com.pivotal.gemfirexd.internal.shared.common.StoredFormatIds
@@ -50,7 +52,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.CodegenContext
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, AttributeReference, Descending, Exists, ExprId, Expression, GenericRow, ListQuery, ParamLiteral, PlanExpression, ScalarSubquery, SortDirection, TokenLiteral}
 import org.apache.spark.sql.catalyst.plans.logical.{Command, Filter, LocalRelation, LogicalPlan, Union}
 import org.apache.spark.sql.catalyst.{DefinedByConstructorParams, InternalRow, TableIdentifier}
-import org.apache.spark.sql.collection.{Utils, WrappedInternalRow}
+import org.apache.spark.sql.collection.{ToolsCallbackInit, Utils, WrappedInternalRow}
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.CollectAggregateExec
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils.CaseInsensitiveMutableHashMap
@@ -65,7 +67,7 @@ import org.apache.spark.sql.execution.streaming.StreamingQueryListenerBus
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 import org.apache.spark.sql.hive.{HiveClientUtil, SnappySessionState}
 import org.apache.spark.sql.internal.StaticSQLConf.SCHEMA_STRING_LENGTH_THRESHOLD
-import org.apache.spark.sql.internal.{BypassRowLevelSecurity, MarkerForCreateTableAsSelect, SessionState, SnappySessionCatalog, SnappySharedState, StaticSQLConf}
+import org.apache.spark.sql.internal._
 import org.apache.spark.sql.row.{JDBCMutableRelation, SnappyStoreDialect}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.store.StoreUtils
@@ -90,7 +92,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
    |  Session-related state  |
    * ----------------------- */
 
-  private[spark] val id = SnappySession.newId()
+  val id: Long = SnappySession.newId()
 
   @transient private lazy val tempCacheIndex = new AtomicInteger(0)
 
@@ -314,18 +316,19 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
   private[sql] def initStateVars(sessionState: SessionState): Unit = {
     val conf = sessionState.conf
 
+    // disable LogicalPlan cache since the ExternalCatalog implementations already have
+    // a large enough cache and this cache causes lot of trouble with stale data especially
+    // in smart connector mode which is already handled by SmartConnectorExternalCatalog
+    conf.setConfString("spark.sql.filesourceTableRelationCacheSize", "0")
+
     planCaching = Property.PlanCaching.get(conf)
     partitionPruning = Property.PartitionPruning.get(conf)
     disableHashJoin = Property.DisableHashJoin.get(conf)
-    enableHiveSupport = isHiveSupportEnabled(conf.getConf(StaticSQLConf.CATALOG_IMPLEMENTATION))
-  }
+    enableHiveSupport = SnappySession.isHiveSupportEnabled(
+      conf.getConf(StaticSQLConf.CATALOG_IMPLEMENTATION))
 
-  private[sql] def isHiveSupportEnabled(v: String): Boolean = Utils.toLowerCase(v) match {
-    case "hive" => true
-    case "in-memory" => false
-    case _ => throw new IllegalArgumentException(
-      s"Unexpected value '$v' for ${StaticSQLConf.CATALOG_IMPLEMENTATION.key}. " +
-          "Allowed values are: in-memory and hive")
+    // Call to update Structured Streaming UI Tab
+    updateStructuredStreamingUITab(sessionState.streamingQueryManager)
   }
 
   /**
@@ -366,6 +369,8 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     if (warnings eq null) sqlWarnings = warning
     else warnings.setNextWarning(warning)
   }
+
+  def newRddId(): Int = sparkContext.newRddId()
 
   /**
    * Get a previously registered context object using [[addContextObject]].
@@ -511,7 +516,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       table: String): Option[LogicalPlan] = {
     // first acquire the global lock for putInto
     val (schemaName: String, _) =
-      JdbcExtendedUtils.getTableWithSchema(table, conn = null, Some(sqlContext.sparkSession))
+      JdbcExtendedUtils.getTableWithDatabase(table, session = Some(sqlContext.sparkSession))
     val lockOption = if (Property.SerializeWrites.get(sessionState.conf)) {
       grabLock(table, schemaName, defaultConnectionProps)
     } else None
@@ -714,6 +719,10 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       case c: SmartConnectorExternalCatalog => c.close()
       case _ => // nothing for global embedded catalog
     }
+    val tcb = ToolsCallbackInit.toolsCallback
+    if (tcb ne null) {
+      tcb.closeAndClearScalaInterpreter(id)
+    }
 
     val finalizer = this.finalizer
     if (finalizer ne null) {
@@ -875,7 +884,6 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       samplingOptions.asScala.toMap, allowExisting)
   }
 
-
   /**
    * Create a stratified sample table.
    *
@@ -918,7 +926,6 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     createSampleTable(tableName, Option(baseTable), schema,
       samplingOptions.asScala.toMap, allowExisting)
   }
-
 
   /**
    * Create approximate structure to query top-K with time series support.
@@ -1392,8 +1399,8 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     }
     // check for permissions in the schema which should be done before the session catalog
     // createTable call since store table will be created by that time
-    val resolvedName = sessionCatalog.resolveTableIdentifier(tableIdent)
-    sessionCatalog.checkSchemaPermission(resolvedName.database.get, resolvedName.table,
+    val resolvedIdentifier = sessionCatalog.resolveTableIdentifier(tableIdent)
+    sessionCatalog.checkDbPermission(resolvedIdentifier.database.get, resolvedIdentifier.table,
       defaultUser = null, ignoreIfNotExists = true)
 
     val schema = userSpecifiedSchema match {
@@ -1410,7 +1417,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       case None => options
       case Some(ddl) =>
         // check that the DataSource should implement ExternalSchemaRelationProvider
-        if (!ExternalStoreUtils.isExternalSchemaRelationProvider(provider, this)) {
+        if (!ExternalStoreUtils.isExternalSchemaRelationProvider(provider, sessionState.conf)) {
           throw new AnalysisException(s"Provider '$provider' should implement " +
               s"ExternalSchemaRelationProvider to use a custom schema string in CREATE TABLE")
         }
@@ -1443,7 +1450,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       CatalogTableType.MANAGED
     } else CatalogTableType.EXTERNAL
     val tableDesc = CatalogTable(
-      identifier = resolvedName,
+      identifier = resolvedIdentifier,
       tableType = tableType,
       storage = storage,
       schema = schema,
@@ -1454,7 +1461,7 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
       comment = comment)
     val plan = CreateTable(tableDesc, mode, query.map(MarkerForCreateTableAsSelect))
     sessionState.executePlan(plan).toRdd
-    val df = table(resolvedName)
+    val df = table(resolvedIdentifier)
     val relation = df.queryExecution.analyzed.collectFirst {
       case l: LogicalRelation => l.relation
     }
@@ -1602,13 +1609,13 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     val schemaName = sessionCatalog.formatDatabaseName(schema)
     if (schemaName != getCurrentSchema) {
       if (createIfNotExists) {
-        sessionCatalog.createSchema(schemaName, ignoreIfExists = true, createInStore = false)
+        sessionCatalog.createDatabase(schemaName, ignoreIfExists = true, createInStore = false)
       }
-      sessionCatalog.setCurrentSchema(schemaName, force = true)
+      sessionCatalog.setCurrentDatabase(schemaName, force = true)
     }
   }
 
-  def getCurrentSchema: String = sessionCatalog.getCurrentSchema
+  def getCurrentSchema: String = sessionCatalog.getCurrentDatabase
 
   /**
    * Create an index on a table.
@@ -1809,12 +1816,20 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     }
   }
 
-  private def dropRowStoreIndex(indexName: String, ifExists: Boolean): Unit = {
+  /**
+   * creates a thin connection to snappydata and returns it
+   * @return connection to snappydata
+   */
+  private def getConnection(table: String): Connection = {
     val connProperties = ExternalStoreUtils.validateAndGetAllProps(
       Some(this), ExternalStoreUtils.emptyCIMutableMap)
-    val jdbcOptions = new JDBCOptions(connProperties.url, indexName,
+    val jdbcOptions = new JDBCOptions(connProperties.url, table,
       connProperties.connProps.asScala.toMap)
-    val conn = JdbcUtils.createConnectionFactory(jdbcOptions)()
+    JdbcUtils.createConnectionFactory(jdbcOptions)()
+  }
+
+  private def dropRowStoreIndex(indexName: String, ifExists: Boolean): Unit = {
+    val conn = getConnection(indexName)
     try {
       val sql = constructDropSQL(indexName, ifExists)
       JdbcExtendedUtils.executeUpdate(sql, conn)
@@ -2066,6 +2081,27 @@ class SnappySession(_sc: SparkContext) extends SparkSession(_sc)
     }
     (scalaTypeVal, SnappySession.getDataType(storeType, storePrecision, storeScale))
   }
+
+  /**
+   * Method to add/update Structured Streaming UI Tab if cluster is running in embedded mode or
+   * smart connector mode using SnappyData's Spark distribution
+   */
+  private def updateStructuredStreamingUITab(streams: StreamingQueryManager): Unit = synchronized {
+    try {
+      val updateUIMethod = classOf[SparkSession].getMethod("updateUIWithStructuredStreamingTab")
+      val listener = updateUIMethod.invoke(this, streams).asInstanceOf[StreamingQueryListener]
+      val finalizer = this.finalizer
+      if (finalizer ne null) {
+        finalizer.registerStreamingListener(streams, listener)
+      }
+    } catch {
+      case _: NoSuchMethodException =>
+        logInfo("Unable to add Structured Streaming UI Tab because " +
+            "updateUIWithStructuredStreamingTab method is not present in SparkSession class. " +
+            "It seems spark distribution used is not snappy-spark distribution.")
+      case e: InvocationTargetException => throw e.getTargetException
+    }
+  }
 }
 
 /**
@@ -2086,22 +2122,22 @@ private class FinalizeSession(session: SnappySession)
   private var sessionId = session.id
 
   private var listenerBus: Option[StreamingQueryListenerBus] = None
-  private var listeners: Seq[StreamingQueryListener] = Nil
+  private var listener: Option[StreamingQueryListener] = None
 
   // Doing this clean up in finalizer as lifecycle of the listener is aligned with session's
   // lifecycle. After this the listener object will be eligible for GC in the next cycle.
   // Also the memory footprint of the listener object is not much hence it should be ok if the
   // listener object is remain alive for one extra GC cycle as compared to the session.
-  def registerStreamingListeners(streamingManager: StreamingQueryManager): Unit = {
+  def registerStreamingListener(streamingManager: StreamingQueryManager,
+      listener: StreamingQueryListener): Unit = {
     this.listenerBus = None
-    this.listeners = Nil
+    this.listener = None
     val m = SnappySession.listenerBusMethod
     if (m ne null) {
       val l = m.invoke(streamingManager).asInstanceOf[StreamingQueryListenerBus]
       if (l ne null) {
-        implicit val tag: ClassTag[Any] = SnappySession.listenerTag
         this.listenerBus = Some(l)
-        this.listeners = l.findListenersByClass()
+        this.listener = Some(listener)
       }
     }
   }
@@ -2114,24 +2150,28 @@ private class FinalizeSession(session: SnappySession)
       sessionId = SnappySession.INVALID_ID
     }
     listenerBus match {
-      case Some(l) if listeners.nonEmpty => listeners.foreach(l.removeListener)
+      case Some(bus) => listener match {
+        case Some(l) => bus.removeListener(l)
+        case _ =>
+      }
       case _ =>
     }
     listenerBus = None
-    listeners = Nil
+    listener = None
     true
   }
 
   override protected def clearThis(): Unit = {
     sessionId = SnappySession.INVALID_ID
+    listenerBus = None
+    listener = None
   }
-
 }
 
-object SnappySession extends Logging {
+object SnappySession extends SparkSupport with Logging {
 
-  private[spark] val INVALID_ID = -1
-  private[this] val ID = new AtomicInteger(0)
+  private[spark] val INVALID_ID = -1L
+  private[this] val ID = new AtomicLong(0L)
   private[sql] val ExecutionKey = "EXECUTION"
   private[sql] val PUTINTO_LOCK = "putinto_lock"
   private[sql] val CACHED_PUTINTO_LOGICAL_PLAN = "cached_putinto_logical_plan"
@@ -2156,6 +2196,14 @@ object SnappySession extends Logging {
     }
   }
 
+  private[sql] def isHiveSupportEnabled(v: String): Boolean = Utils.toLowerCase(v) match {
+    case "hive" => true
+    case "in-memory" => false
+    case _ => throw new IllegalArgumentException(
+      s"Unexpected value '$v' for ${StaticSQLConf.CATALOG_IMPLEMENTATION.key}. " +
+          "Allowed values are: in-memory and hive")
+  }
+
   def tableIdentifier(table: String, catalog: SnappySessionCatalog,
       resolve: Boolean): TableIdentifier = {
     // hive meta-store is case-insensitive so use lower case names for object names consistently
@@ -2166,7 +2214,7 @@ object SnappySession extends Logging {
       new TableIdentifier(fullName.substring(dotIndex + 1),
         Some(fullName.substring(0, dotIndex)))
     } else if (resolve && (catalog ne null)) {
-      new TableIdentifier(fullName, Some(catalog.getCurrentSchema))
+      new TableIdentifier(fullName, Some(catalog.getCurrentDatabase))
     } else new TableIdentifier(fullName, None)
   }
 
@@ -2198,20 +2246,22 @@ object SnappySession extends Logging {
     case _ => (plan, null)
   }
 
-  private[sql] def setExecutionProperties(localProperties: Properties,
-      executionIdStr: String, queryLongForm: String): Unit = {
-    localProperties.setProperty(SQLExecution.EXECUTION_ID_KEY, executionIdStr)
+  private[sql] def setExecutionProperties(localProperties: Properties, executionId: String,
+      jobGroupId: String, queryLongForm: String): Unit = {
+    localProperties.setProperty(SQLExecution.EXECUTION_ID_KEY, executionId)
     // trim query string to 10K to keep its UTF8 form always < 32K which is the limit
     // for DataOutput.writeUTF used during task serialization
     localProperties.setProperty(SparkContext.SPARK_JOB_DESCRIPTION,
       CachedDataFrame.queryStringShortForm(queryLongForm, 10240))
-    localProperties.setProperty(SparkContext.SPARK_JOB_GROUP_ID, executionIdStr)
+    localProperties.setProperty(SparkContext.SPARK_JOB_GROUP_ID, jobGroupId)
   }
 
-  private[sql] def clearExecutionProperties(localProperties: Properties): Unit = {
+  private[sql] def clearExecutionProperties(localProperties: Properties,
+      oldExecutionId: String): Unit = {
     localProperties.remove(SparkContext.SPARK_JOB_GROUP_ID)
     localProperties.remove(SparkContext.SPARK_JOB_DESCRIPTION)
-    localProperties.remove(SQLExecution.EXECUTION_ID_KEY)
+    if (oldExecutionId eq null) localProperties.remove(SQLExecution.EXECUTION_ID_KEY)
+    else localProperties.setProperty(SQLExecution.EXECUTION_ID_KEY, oldExecutionId)
   }
 
   private[sql] def isCommandExec(plan: SparkPlan): Boolean = plan match {
@@ -2240,13 +2290,17 @@ object SnappySession extends Logging {
     val executionId = Utils.nextExecutionIdMethod.invoke(SQLExecution).asInstanceOf[Long]
     val context = session.sparkContext
     var localProperties: Properties = null
+    var oldExecutionId: String = null
     var startTime = -1L
     var endTime = -1L
     if (cachedPlan) {
       sqlText = "PLAN [" + sql + ']'
       localProperties = context.getLocalProperties
       startTime = System.currentTimeMillis()
-      setExecutionProperties(localProperties, java.lang.Long.toString(executionId), sqlText)
+      oldExecutionId = localProperties.getProperty(SQLExecution.EXECUTION_ID_KEY)
+      val executionIdStr = java.lang.Long.toString(executionId)
+      val jobGroupId = session.snappySessionState.jdbcQueryJobGroupId(executionIdStr)
+      setExecutionProperties(localProperties, executionIdStr, jobGroupId, sqlText)
     }
     var success = false
     try {
@@ -2278,7 +2332,7 @@ object SnappySession extends Logging {
           executionId, endTime - startTime)
     } finally {
       if (cachedPlan) {
-        clearExecutionProperties(localProperties)
+        clearExecutionProperties(localProperties, oldExecutionId)
         if (endTime == -1L) endTime = System.currentTimeMillis()
         // post the end of SQL at the end of planning phase; this will be re-posted during
         // execution with the submission time adjusted (by the planning time) in CachedDataFrame
@@ -2401,18 +2455,74 @@ object SnappySession extends Logging {
 
     logDebug(s"qe.executedPlan = ${qe.executedPlan}")
 
+    val checkAuthOfExternalTables = java.lang.Boolean.parseBoolean(
+      System.getProperty("CHECK_EXTERNAL_TABLE_AUTHZ"))
+    // second condition means smart connector mode
+    if (checkAuthOfExternalTables || (ToolsCallbackInit.toolsCallback == null)) {
+      // check for external tables in the plan.
+      val scanNodes = executedPlan.collect {
+        case dsc: DataSourceScanExec if !dsc.relation.isInstanceOf[PartitionedDataSourceScan] => dsc
+      }
+      if (scanNodes.nonEmpty) {
+        checkCurrentUserAllowed(session, scanNodes)
+      }
+    }
+
     val (rdd, rddId, shuffleDependencies, shuffleCleanups) = if (cachedPlan && cachedRDD != null) {
       val shuffleDeps = findShuffleDependencies(cachedRDD).toArray
       val cleanups = new Array[Future[Unit]](shuffleDeps.length)
       (cachedRDD, cachedRDD.id, shuffleDeps, cleanups)
     } else {
-      (null, if (cachedRDDId != -1) cachedRDDId else session.sparkContext.newRddId(),
+      (null, if (cachedRDDId != -1) cachedRDDId else session.newRddId(),
           Array.emptyIntArray, EMPTY_SHUFFLE_CLEANUPS)
     }
     new CachedDataFrame(session, execution, origExecutionString, executionString, origPlanInfo,
       planInfo, rdd, shuffleDependencies, RowEncoder(qe.analyzed.schema), CachedDataFrame.wrap(
         paramLiterals), paramsId, sqlShortText, sqlText, shuffleCleanups, rddId, noSideEffects,
       queryHints, executionId, planningTime, session.hasLinkPartitionsToBuckets)
+  }
+
+  private def checkCurrentUserAllowed(session: SnappySession,
+      scanNodes: Seq[DataSourceScanExec]): Unit = {
+    var currentUser = SnappyContext.getClusterMode(session.sparkContext) match {
+      case ThinClientConnectorMode(_, _) =>
+        session.conf.get(Constant.SPARK_STORE_PREFIX + Attribute.USERNAME_ATTR, null)
+      case _ => session.conf.get(Attribute.USERNAME_ATTR, default = null)
+    }
+    if (currentUser eq null) currentUser = ""
+    if (ToolsCallbackInit.toolsCallback != null) {
+      scanNodes.foreach { scan =>
+        val authzException = ToolsCallbackInit.toolsCallback.isUserAuthorizedForExtTable(
+          currentUser, internals.tableIdentifier(scan))
+        if (authzException ne null) throw authzException
+      }
+    } else if (SnappyContext.getClusterMode(session.sparkContext)
+        .isInstanceOf[ThinClientConnectorMode]) {
+      // Smart Connector Mode
+      val tables = scanNodes.collect {
+        case scan if internals.tableIdentifier(scan).isDefined =>
+          internals.tableIdentifier(scan).get.unquotedString
+      }
+      if (tables.nonEmpty) {
+        val connection = session.getConnection(tables.head)
+        val cstmt = connection.prepareCall("call sys.CHECK_AUTHZ_ON_EXT_TABLES(?, ?, ?)")
+        try {
+          cstmt.setString(1, currentUser)
+          val allTablesStr = tables.mkString(",")
+          cstmt.setString(2, allTablesStr)
+          cstmt.registerOutParameter(3, java.sql.Types.VARCHAR)
+          cstmt.execute()
+          val ret = cstmt.getString(3)
+          if (ret != null && ret.nonEmpty) {
+            // throw exception
+            throw new AnalysisException(s"$currentUser  not authorized to access $ret")
+          }
+        } finally {
+          if (cstmt != null) cstmt.close()
+          if (connection != null) connection.close()
+        }
+      }
+    }
   }
 
   private[this] lazy val planCache = {
@@ -2431,8 +2541,9 @@ object SnappySession extends Logging {
     val sqlShortText = CachedDataFrame.queryStringShortForm(sqlText)
     val plan = parser.parsePlan(sqlText, clearExecutionData = true)
     val planCaching = session.planCaching
-    val paramLiterals = parser.sqlParser.getAllLiterals
-    val paramsId = parser.sqlParser.getCurrentParamsId
+    val sqlParser = parser.sqlParser
+    val paramLiterals = sqlParser.getAllLiterals
+    val paramsId = sqlParser.getCurrentParamsId
     val queryHints = session.getLastQueryHints
     val key = CachedKey(session, session.getCurrentSchema,
       plan, sqlText, paramLiterals, paramsId, planCaching, queryHints.hashCode())
@@ -2504,10 +2615,9 @@ object SnappySession extends Logging {
     } else text
   }
 
-  private def newId(): Int = {
+  private def newId(): Long = {
     val id = ID.incrementAndGet()
-    if (id != INVALID_ID) id
-    else ID.incrementAndGet()
+    if (id != INVALID_ID) id else ID.incrementAndGet()
   }
 
   private[spark] def clearSessionCache(sessionId: Long): Unit = {
@@ -2562,7 +2672,8 @@ object SnappySession extends Logging {
     case _ => StringType
   }
 
-  def getValue(dvd: stypes.DataValueDescriptor): Any = dvd match {
+  def getValue(dvd: stypes.DataValueDescriptor,
+      returnUTF8String: Boolean = true): Any = dvd match {
     case i: stypes.SQLInteger => i.getInt
     case si: stypes.SQLSmallint => si.getShort
     case ti: stypes.SQLTinyint => ti.getByte
@@ -2576,11 +2687,14 @@ object SnappySession extends Logging {
       val charArray = cl.getCharArray()
       if (charArray != null) {
         val str = String.valueOf(charArray)
-        UTF8String.fromString(str)
+        if (returnUTF8String) UTF8String.fromString(str) else str
       } else null
-    case lvc: stypes.SQLLongvarchar => UTF8String.fromString(lvc.getString)
-    case vc: stypes.SQLVarchar => UTF8String.fromString(vc.getString)
-    case c: stypes.SQLChar => UTF8String.fromString(c.getString)
+    case lvc: stypes.SQLLongvarchar =>
+      if (returnUTF8String) UTF8String.fromString(lvc.getString) else lvc.getString
+    case vc: stypes.SQLVarchar =>
+      if (returnUTF8String) UTF8String.fromString(vc.getString) else vc.getString
+    case c: stypes.SQLChar =>
+      if (returnUTF8String) UTF8String.fromString(c.getString) else c.getString
     case ts: stypes.SQLTimestamp => ts.getTimestamp(null)
     case t: stypes.SQLTime => t.getTime(null)
     case d: stypes.SQLDate =>

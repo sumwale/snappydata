@@ -33,7 +33,7 @@ import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.serializer.KryoSerializerPool
 import org.apache.spark.sql.internal.ContextJarUtils
 import org.apache.spark.util.{MutableURLClassLoader, ShutdownHookManager, SparkExitCode, Utils}
-import org.apache.spark.{Logging, SparkEnv, SparkFiles}
+import org.apache.spark.{Logging, SparkConf, SparkEnv, SparkFiles}
 
 class SnappyExecutor(
     executorId: String,
@@ -78,8 +78,12 @@ class SnappyExecutor(
   }
 
   private val classLoaderCache = {
-    val loader = new CacheLoader[ClassLoaderKey, SnappyMutableURLClassLoader]() {
-      override def load(key: ClassLoaderKey): SnappyMutableURLClassLoader = {
+    // noinspection TypeAnnotation
+    val loader = new CacheLoader[ClassLoaderKey, ClassLoader]() {
+      override def load(key: ClassLoaderKey): ClassLoader = {
+        if (key.isReplPath) return mutableLoaderWithRepl(key)
+        logInfo(s"Creating ClassLoader for key = $key" +
+            s" with appTime = ${key.appTime} and appName = ${key.appName}")
         val appName = key.appName // appName = "schemaname.functionname"
         val appNameAndJars = key.appNameAndJars
         lazy val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
@@ -114,7 +118,7 @@ class SnappyExecutor(
                 env.securityManager, hadoopConf, -1L, useCache = !isLocal)
               val url = new File(SparkFiles.getRootDirectory(), localName).toURI.toURL
               if (includeInGlobalCmdRegion) {
-                Misc.getMemStore.getGlobalCmdRgn.put(ContextJarUtils.functionKeyPrefix + appName,
+                Misc.getMemStore.getMetadataCmdRgn.put(ContextJarUtils.functionKeyPrefix + appName,
                   name)
               }
               url // points to the jar in executor's work directory
@@ -128,6 +132,21 @@ class SnappyExecutor(
         KryoSerializerPool.clear()
         newClassLoader
       }
+
+      private def mutableLoaderWithRepl(key: ClassLoaderKey): ClassLoader = {
+        try {
+          val klass = Utils.classForName("org.apache.spark.repl.SnappyExecutorClassLoader")
+              .asInstanceOf[Class[_ <: ClassLoader]]
+          val constructor = klass.getConstructor(classOf[SparkConf], classOf[SparkEnv],
+            classOf[String], classOf[ClassLoader], classOf[Boolean])
+          constructor.newInstance(conf, env, key.appName, replClassLoader, java.lang.Boolean.TRUE)
+        } catch {
+          case _: ClassNotFoundException =>
+            logError("Could not find org.apache.spark.repl.ExecutorClassLoader on classpath!")
+            System.exit(1)
+            null
+        }
+      }
     }
     // Keeping 500 as cache size. Can revisit the number
     CacheBuilder.newBuilder().maximumSize(500).build(loader)
@@ -135,15 +154,26 @@ class SnappyExecutor(
 
   class ClassLoaderKey(val appName: String,
       val appTime: String,
-      val appNameAndJars: Array[String]) {
+      val appNameAndJars: Array[String], val isReplPath: Boolean = false) {
 
-    override def hashCode(): Int = (appName, appTime).hashCode()
+    override def hashCode(): Int = {
+      if (!isReplPath) (appName, appTime).hashCode()
+      else appName.hashCode() // repl output dir is in appName
+    }
 
     override def equals(obj: Any): Boolean = {
       obj match {
-        case x: ClassLoaderKey => x.appName == appName && x.appTime == appTime
+        case x: ClassLoaderKey =>
+          if (!isReplPath) x.appName == appName && x.appTime == appTime
+          else x.appName.equals(appName)
         case _ => false
       }
+    }
+
+    private var userClasspathFirst = false
+
+    def setUserClassPathFirst(userClassPathFirst: Boolean): Unit = {
+      this.userClasspathFirst = userClassPathFirst
     }
   }
 
@@ -155,13 +185,23 @@ class SnappyExecutor(
       if (null != taskDeserializationProps) {
         val appDetails = taskDeserializationProps.getProperty(io.snappydata.Constant
             .CHANGEABLE_JAR_NAME, "")
-        logDebug(s"Submitted Application Details $appDetails")
+        val replOutputDir = taskDeserializationProps.getProperty(
+          io.snappydata.Constant.REPL_OUTPUT_DIR)
+        logDebug(s"Submitted Application Details $appDetails and replOutputdir = $replOutputDir")
         if (!appDetails.isEmpty) {
           val appNameAndJars = appDetails.split(",")
           val threadClassLoader =
             classLoaderCache.getUnchecked(new ClassLoaderKey(appNameAndJars(0),
               appNameAndJars(1), appNameAndJars))
           logDebug(s"Setting thread classloader  $threadClassLoader")
+          Thread.currentThread().setContextClassLoader(threadClassLoader)
+        } else if (replOutputDir != null) {
+          logInfo(s"Application Details empty so repl class loader for $replOutputDir")
+          val cKey = new ClassLoaderKey(replOutputDir,
+            null, null, true)
+          cKey.setUserClassPathFirst(true)
+          val threadClassLoader = classLoaderCache.getUnchecked(cKey)
+          logDebug(s"Setting thread classloader with repl $threadClassLoader for $replOutputDir")
           Thread.currentThread().setContextClassLoader(threadClassLoader)
         }
       }
@@ -230,6 +270,12 @@ class SnappyExecutor(
 
   def getLocalDir: String = {
     Utils.getLocalDir(conf)
+  }
+
+  def invalidateReplLoader(replDir: String): Unit = try {
+    classLoaderCache.invalidate(replDir)
+  } catch {
+    case _: NullPointerException => // ignore
   }
 }
 

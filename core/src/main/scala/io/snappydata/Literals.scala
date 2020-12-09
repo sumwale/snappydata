@@ -22,7 +22,7 @@ import com.gemstone.gemfire.internal.shared.unsafe.DirectBufferAllocator
 import com.pivotal.gemfirexd.internal.engine.GfxdConstants
 
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
-import org.apache.spark.sql.internal.{AltName, SQLAltName, SQLConfigEntry}
+import org.apache.spark.sql.internal.{AltName, SQLAltName, SQLConf, SQLConfigEntry}
 import org.apache.spark.sql.sources.JdbcExtendedUtils
 
 /**
@@ -110,6 +110,9 @@ object Property extends Enumeration {
         "behavior hive compatible for statements like SHOW TABLES rather than being " +
         "compatible with Spark SQL. Default is 'snappy' except for hive thrift server " +
         "connections where the default is 'spark'.", Some("snappy"), prefix = null)
+
+  def hiveCompatible(sqlConf: SQLConf): Boolean =
+    Compatibility.get(sqlConf).equalsIgnoreCase("hive")
 
   val HiveServerUseHiveSession: SparkValue[Boolean] = Val(
     s"${Constant.PROPERTY_PREFIX}hiveServer.useHiveSession", "If true, then the session " +
@@ -299,7 +302,7 @@ object Property extends Enumeration {
     "Use the new ByteBufferMap based SnappyHashAggregateExec even for single column group by." +
         "The default value is false since the older implementation is substantially faster " +
         "for most of single column group by cases (except if number of groups is very large).",
-    Some(false))
+    Some(true))
 
   val ApproxMaxCapacityOfBBMap: SQLValue[Int] = SQLVal[Int](
     s"${Constant.PROPERTY_PREFIX}sql.approxMaxCapacityOfBBMap",
@@ -316,6 +319,25 @@ object Property extends Enumeration {
     s"${Constant.PROPERTY_PREFIX}sql.disableCodegenFallback",
     s"The test flag if set to true will throw Exception instead of creating CodegenSparkFallback " +
       s"Default value is false", Some(false))
+
+  val TestCodeSplitThresholdInSHA: SQLValue[Int] = SQLVal[Int](
+    s"${Constant.PROPERTY_PREFIX}sql.codeSplitThresholdInSHA",
+    s"The maximum number of group by keys or aggregates which can generate inline " +
+      s"code in SnappyHashAggregateExec. Beyond the threshold value" +
+      s", code splitting occurs through functions. Default value is 75", Some(75))
+
+  val TestCodeSplitFunctionParamsSizeInSHA: SQLValue[Int] = SQLVal[Int](
+    s"${Constant.PROPERTY_PREFIX}sql.codeSplitFunctionParamsSizeInSHA",
+    s"The number of group by keys or aggregates which should be used as parameters at a time" +
+      s" for code splitting function", Some(5))
+
+  // By default it will be same as MAX_TASK_FAILURES
+  // User should set it to 0, if they want insert to fail on any failure.
+  // this is used in TaskSchedulerImpl.SNAPPY_WRITE_RETRY_PROP Any change here
+  // should be done reflected there too.
+  val MaxRetryAttemptsForWrite: SQLValue[Int] = SQLVal[Int](
+    s"${Constant.PROPERTY_PREFIX}maxRetryAttemptsForWrite",
+    s"The number of times a write task should be retried before all tasks failing.", Some(4))
 }
 
 // extractors for properties

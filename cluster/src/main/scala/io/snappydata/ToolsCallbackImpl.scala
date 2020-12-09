@@ -19,6 +19,7 @@ package io.snappydata
 import java.io.{File, RandomAccessFile}
 import java.lang.reflect.InvocationTargetException
 import java.net.{URI, URLClassLoader}
+import java.util.Properties
 
 import scala.collection.JavaConverters._
 
@@ -28,10 +29,14 @@ import com.pivotal.gemfirexd.internal.engine.distributed.utils.GemFireXDUtils
 import com.pivotal.gemfirexd.internal.iapi.error.StandardException
 import com.pivotal.gemfirexd.internal.shared.common.reference.SQLState
 import io.snappydata.cluster.ExecutorInitiator
-import io.snappydata.impl.{ExtendibleURLClassLoader, LeadImpl}
+import io.snappydata.impl.LeadImpl
+import io.snappydata.remote.interpreter.SnappyInterpreterExecute
 
 import org.apache.spark.executor.SnappyExecutor
-import org.apache.spark.sql.SparkSupport
+import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.execution.GrantRevokeOnExternalTable
 import org.apache.spark.sql.execution.columnar.impl.StoreCallbacksImpl
 import org.apache.spark.sql.hive.thriftserver.SnappyHiveThriftServer2
 import org.apache.spark.sql.internal.ContextJarUtils
@@ -97,14 +102,14 @@ object ToolsCallbackImpl extends ToolsCallback with Logging {
       deploySql: String, isPackage: Boolean = true): Unit = {
     if (alias != null) {
       try {
-        Misc.getMemStore.getGlobalCmdRgn.create(alias, deploySql)
+        Misc.getMemStore.getMetadataCmdRgn.create(alias, deploySql)
       } catch {
         case _: EntryExistsException => throw StandardException.newException(
           SQLState.LANG_DB2_DUPLICATE_NAMES, alias, "of deploying jars/packages")
       }
     }
     val lead = ServiceManager.getLeadInstance.asInstanceOf[LeadImpl]
-    val loader = lead.urlclassloader
+    val loader = lead.urlClassLoader
     jars.foreach(j => {
       val url = new File(j).toURI.toURL
       loader.addURL(url)
@@ -139,8 +144,10 @@ object ToolsCallbackImpl extends ToolsCallback with Logging {
       if (!args(0).isEmpty) { // args(0) = appname-filename
         val appName = args(0).split('-')(0)
         // This url points to the jar on the file server
-        val url = Misc.getMemStore.getGlobalCmdRgn.get(ContextJarUtils.functionKeyPrefix + appName)
-        if (url != null && !url.isEmpty) {
+        val urlObj = Misc.getMemStore.getMetadataCmdRgn.get(
+          ContextJarUtils.functionKeyPrefix + appName)
+        val url = if (urlObj ne null) urlObj.toString else null
+        if ((url ne null) && !url.isEmpty) {
           val executor = ExecutorInitiator.snappyExecBackend.executor.asInstanceOf[SnappyExecutor]
           val cachedFileName = s"${url.hashCode}-1_cache"
           val lockFileName = s"${url.hashCode}-1_lock"
@@ -182,28 +189,39 @@ object ToolsCallbackImpl extends ToolsCallback with Logging {
     })
   }
 
-  override def getAllGlobalCmnds: Array[String] = {
-    GemFireXDUtils.waitForNodeInitialization()
-    val r = Misc.getMemStore.getGlobalCmdRgn
-    val keys = r.keySet().asScala.filter(p => !p.startsWith(ContextJarUtils.functionKeyPrefix))
-    r.getAll(keys.asJava).values().toArray.map(_.asInstanceOf[String])
+  override def invalidateReplClassLoader(replDir: String): Unit = {
+    try {
+      val snappyexecutor = ExecutorInitiator.snappyExecBackend.executor.asInstanceOf[SnappyExecutor]
+      snappyexecutor.invalidateReplLoader(replDir)
+    } catch {
+      case _: NullPointerException => // ignore
+    }
   }
 
-  override def getGlobalCmndsSet: java.util.Set[java.util.Map.Entry[String, String]] = {
+  override def getGlobalCommands(skipBuiltins: Boolean,
+      skipFunctions: Boolean): Map[String, AnyRef] = {
     GemFireXDUtils.waitForNodeInitialization()
-    Misc.getMemStore.getGlobalCmdRgn.entrySet()
+    val entries = Misc.getMemStore.getMetadataCmdRgn.entrySet().asScala
+    entries.collect {
+      case p if !skipBuiltins || !(p.getKey.equals(Constant.CLUSTER_ID) ||
+          p.getKey.equals(Constant.INTP_GRANT_REVOKE_KEY) ||
+          p.getKey.startsWith(Constant.EXTERNAL_TABLE_REGION_KEY_PREFIX) ||
+          (skipFunctions && (p.getKey.startsWith(ContextJarUtils.functionKeyPrefix)
+              || p.getKey.equals(ContextJarUtils.droppedFunctionsKey))) ||
+          p.getKey.startsWith(Constant.MEMBER_ID_PREFIX)) => p.getKey -> p.getValue
+    }.toMap
   }
 
   override def removePackage(alias: String): Unit = {
     GemFireXDUtils.waitForNodeInitialization()
-    Misc.getMemStore.getGlobalCmdRgn.destroy(alias)
+    Misc.getMemStore.getMetadataCmdRgn.destroy(alias)
   }
 
   override def setLeadClassLoader(): Unit = {
     val instance = ServiceManager.currentFabricServiceInstance
     instance match {
       case li: LeadImpl =>
-        val loader = li.urlclassloader
+        val loader = li.urlClassLoader
         if (loader != null) {
           Thread.currentThread().setContextClassLoader(loader)
         }
@@ -216,7 +234,7 @@ object ToolsCallbackImpl extends ToolsCallback with Logging {
     val instance = ServiceManager.currentFabricServiceInstance
     instance match {
       case li: LeadImpl =>
-        val loader = li.urlclassloader
+        val loader = li.urlClassLoader
         if (loader != null) {
           ret = loader
         }
@@ -225,21 +243,86 @@ object ToolsCallbackImpl extends ToolsCallback with Logging {
     ret
   }
 
-  override def checkSchemaPermission(schema: String, currentUser: String): String =
-    StoreCallbacksImpl.checkSchemaPermission(schema, currentUser)
+  override def checkDatabasePermission(db: String, currentUser: String): String =
+    StoreCallbacksImpl.checkDatabasePermission(db, currentUser)
 
   override def removeURIs(uris: Array[String], isPackage: Boolean): Unit = {
     val lead = ServiceManager.getLeadInstance.asInstanceOf[LeadImpl]
-    val allURLs = lead.urlclassloader.getURLs
+    val loader = lead.urlClassLoader
+    val allURLs = loader.getURLs
     val updatedURLs = allURLs.toBuffer
-    uris.foreach(uri => {
-      val newUri = new URI("file:" + uri)
-      if (updatedURLs.contains(newUri.toURL)) {
-        updatedURLs.remove(updatedURLs.indexOf(newUri.toURL))
+    val snc = SnappyContext.globalSparkContext
+    uris.foreach { uri =>
+      val newURI = if (uri.startsWith("file:")) uri else "file:" + uri
+      val index = updatedURLs.indexOf(new URI(newURI).toURL)
+      if (index != -1) updatedURLs.remove(index)
+      snc.removeFile(uri)
+    }
+    if (allURLs.length != updatedURLs.length) {
+      lead.initURLClassLoader(loader.getParent, updatedURLs)
+    }
+  }
+
+  override def updateInterpreterGrantRevoke(grantor: String, isGrant: Boolean,
+      users: Seq[String]): Unit = {
+    SnappyInterpreterExecute.handleNewPermissions(grantor, isGrant, users)
+  }
+
+  def updateGrantRevokeOnExternalTable(grantor: String, isGrant: Boolean,
+      td: TableIdentifier, users: Seq[String], catalogTable: CatalogTable): Unit = {
+
+    // this can be issued by only dbOwner or table owner
+    val tableOwner = catalogTable.database // catalogTable.owner returns an OS user
+    val dbOwner = PermissionChecker.dbOwner
+    if (!(grantor.equalsIgnoreCase(tableOwner) || grantor.equalsIgnoreCase(dbOwner))) {
+      throw StandardException.newException(
+        SQLState.AUTH_NO_OBJECT_PERMISSION, grantor,
+        "grant/revoke permission on ", "external table", td)
+    }
+
+    val fqtn = tableOwner + '.' + td.table
+    val key = GrantRevokeOnExternalTable.getMetaRegionKey(fqtn)
+    PermissionChecker.addRemoveUserForKey(key, isGrant, users)
+  }
+
+  override def isUserAuthorizedForExtTable(currentUser: String,
+      metastoreTableIdentifier: Option[TableIdentifier]): Exception = {
+    if (!Misc.isSecurityEnabled) return null
+    if (metastoreTableIdentifier.isDefined) {
+      val tableIdentifier = metastoreTableIdentifier.get
+      val db = tableIdentifier.database match {
+        case None => currentUser
+        case Some(s) => s
       }
-    })
-    lead.urlclassloader = new ExtendibleURLClassLoader(lead.urlclassloader.getParent)
-    updatedURLs.foreach(url => lead.urlclassloader.addURL(url))
-    Thread.currentThread().setContextClassLoader(lead.urlclassloader)
+      val table = tableIdentifier.table
+      val fqtn = db + '.' + table
+      val key = GrantRevokeOnExternalTable.getMetaRegionKey(fqtn)
+      if (!PermissionChecker.isAllowed(key, currentUser, db)) {
+        logDebug(s"current user $currentUser not authorized to access $fqtn")
+        return StandardException.newException(
+          SQLState.AUTH_NO_EXECUTE_PERMISSION, currentUser, "external table", "", db, table)
+      } else {
+        logDebug(s"current user $currentUser is authorized to access $fqtn")
+      }
+    }
+    null
+  }
+
+  override def refreshLdapGroupCallback(group: String): Unit = {
+    SnappyInterpreterExecute.refreshOnLdapGroupRefresh(group)
+  }
+
+  override def getInterpreterClassLoader(taskProps: Properties): ClassLoader = {
+    val prop = taskProps.getProperty(Constant.REPL_OUTPUT_DIR)
+    SnappyInterpreterExecute.getLoader(prop)
+  }
+
+  override def getScalaCodeDF(code: String,
+      session: SnappySession, options: Map[String, String]): Dataset[Row] = {
+    SnappyInterpreterExecute.getScalaCodeDF(code, session, options)
+  }
+
+  override def closeAndClearScalaInterpreter(uniqueId: Long): Unit = {
+    SnappyInterpreterExecute.closeRemoteInterpreter(uniqueId)
   }
 }

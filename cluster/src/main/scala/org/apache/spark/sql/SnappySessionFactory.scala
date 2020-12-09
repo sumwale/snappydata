@@ -97,7 +97,7 @@ object SnappySessionFactory {
       override def makeClassLoader(parent: ContextURLClassLoader): ContextURLClassLoader = {
         val cl = SnappyUtils.getSnappyContextURLClassLoader(parent)
         val lead = ServiceManager.getLeadInstance.asInstanceOf[LeadImpl]
-        val loader = lead.urlclassloader
+        val loader = lead.urlClassLoader
         if (loader != null) {
           loader.getURLs.foreach(u => {
             cl.addURL(u)

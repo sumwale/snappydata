@@ -43,7 +43,7 @@ abstract class SnappyDataBaseDialect extends JdbcExtendedDialect {
       context: SQLContext): Boolean = {
     if (table.equalsIgnoreCase(JdbcExtendedUtils.DUMMY_TABLE_QUALIFIED_NAME)) return true
     val session = context.sparkSession
-    val (schemaName, tableName) = JdbcExtendedUtils.getTableWithSchema(
+    val (schemaName, tableName) = JdbcExtendedUtils.getTableWithDatabase(
       table, conn, Some(session))
     session.catalog.tableExists(schemaName, tableName)
   }
@@ -199,10 +199,6 @@ abstract class SnappyDataBaseDialect extends JdbcExtendedDialect {
 
   override def getSchemaQuery(table: String): String = {
     s"SELECT * FROM ${quotedName(table)} FETCH FIRST ROW ONLY"
-  }
-
-  override def createSchema(schemaName: String, conn: Connection): Unit = {
-    JdbcExtendedUtils.executeUpdate("CREATE SCHEMA " + schemaName, conn)
   }
 
   override def dropTable(tableName: String, conn: Connection,

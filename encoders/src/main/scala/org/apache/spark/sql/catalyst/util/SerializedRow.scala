@@ -37,6 +37,8 @@ package org.apache.spark.sql.catalyst.util
 
 import java.io.{Externalizable, IOException, ObjectInput, ObjectOutput}
 
+import scala.annotation.tailrec
+
 import com.esotericsoftware.kryo.io.{Input, Output}
 import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 
@@ -87,10 +89,36 @@ final class SerializedRow extends InternalRow with SerializedRowData {
   override def anyNull: Boolean = isAnyNull
 }
 
+trait TypeSpecializedGetters extends SpecializedGetters {
+
+  @tailrec
+  protected final def typedGet(ordinal: Int, dataType: DataType): AnyRef =
+    if (isNullAt(ordinal)) null else dataType match {
+      case IntegerType | DateType => Int.box(getInt(ordinal))
+      case LongType | TimestampType => Long.box(getLong(ordinal))
+      case StringType => getUTF8String(ordinal)
+      case DoubleType => Double.box(getDouble(ordinal))
+      case d: DecimalType => getDecimal(ordinal, d.precision, d.scale)
+      case FloatType => Float.box(getFloat(ordinal))
+      case BooleanType => Boolean.box(getBoolean(ordinal))
+      case ByteType => Byte.box(getByte(ordinal))
+      case ShortType => Short.box(getShort(ordinal))
+      case BinaryType => getBinary(ordinal)
+      case CalendarIntervalType => getInterval(ordinal)
+      case NullType => null
+      case _: ArrayType => getArray(ordinal)
+      case _: MapType => getMap(ordinal)
+      case s: StructType => getStruct(ordinal, s.size)
+      case u: UserDefinedType[_] => typedGet(ordinal, u.sqlType)
+      case _ => throw new UnsupportedOperationException(
+        s"Unsupported data type ${dataType.simpleString}")
+    }
+}
+
 /**
  * Contains the main code for `SerializedRow` and `SerializedArray`.
  */
-trait SerializedRowData extends SpecializedGetters
+trait SerializedRowData extends TypeSpecializedGetters
     with Externalizable with KryoSerializable {
 
   protected final var baseObject: AnyRef = _
@@ -171,27 +199,7 @@ trait SerializedRowData extends SpecializedGetters
     this.sizeInBytes = sizeInBytes
   }
 
-  final def get(ordinal: Int, dataType: DataType): AnyRef = dataType match {
-    case NullType => null
-    case _ if isNullAt(ordinal) => null
-    case IntegerType | DateType => Int.box(getInt(ordinal))
-    case LongType | TimestampType => Long.box(getLong(ordinal))
-    case StringType => getUTF8String(ordinal)
-    case DoubleType => Double.box(getDouble(ordinal))
-    case d: DecimalType => getDecimal(ordinal, d.precision, d.scale)
-    case FloatType => Float.box(getFloat(ordinal))
-    case BooleanType => Boolean.box(getBoolean(ordinal))
-    case ByteType => Byte.box(getByte(ordinal))
-    case ShortType => Short.box(getShort(ordinal))
-    case BinaryType => getBinary(ordinal)
-    case CalendarIntervalType => getInterval(ordinal)
-    case _: ArrayType => getArray(ordinal)
-    case _: MapType => getMap(ordinal)
-    case s: StructType => getStruct(ordinal, s.size)
-    case u: UserDefinedType[_] => get(ordinal, u.sqlType)
-    case _ => throw new UnsupportedOperationException(
-      s"Unsupported data type ${dataType.simpleString}")
-  }
+  final def get(ordinal: Int, dataType: DataType): AnyRef = typedGet(ordinal, dataType)
 
   final def isNullAt(ordinal: Int): Boolean = {
     if (indexIsValid(ordinal)) {

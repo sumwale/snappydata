@@ -77,13 +77,12 @@ class SnappyContextFunctions(val session: SnappySession) extends SparkSupport {
   /**
    * Return the set of temporary samples for a given table that are not tracked in catalog.
    */
-  def getSamples(base: LogicalPlan): Seq[LogicalPlan] = throw missingAQPException()
+  def getSamples(base: LogicalPlan): Seq[LogicalPlan] = Nil
 
   /**
    * Return the set of samples for a given table that are tracked in catalog and are not temporary.
    */
-  def getSampleRelations(baseTable: TableIdentifier): Seq[(LogicalPlan, String)] =
-    throw missingAQPException()
+  def getSampleRelations(baseTable: TableIdentifier): Seq[(LogicalPlan, String)] = Nil
 
   def postCreateTable(table: CatalogTable): Unit = {}
 

@@ -33,9 +33,6 @@ import org.apache.spark.sql.execution.columnar.impl._
 import org.apache.spark.sql.execution.row.PRValuesIterator
 import org.apache.spark.sql.types.StructField
 
-case class ColumnBatch(numRows: Int, buffers: Array[ByteBuffer],
-    statsData: Array[Byte], deltaIndexes: Array[Int])
-
 object ColumnBatchIterator {
 
   def apply(region: LocalRegion,

@@ -45,7 +45,7 @@ import org.apache.spark.sql.execution.datasources.{DataSource, LogicalRelation}
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.execution.row.RowTableScan
 import org.apache.spark.sql.execution.ui.SQLTab
-import org.apache.spark.sql.execution.{CacheManager, CodegenSparkFallback, PartitionedDataSourceScan, RowDataSourceScanExec, SparkPlan, WholeStageCodegenExec}
+import org.apache.spark.sql.execution.{CacheManager, CodegenSparkFallback, DataSourceScanExec, PartitionedDataSourceScan, RowDataSourceScanExec, SparkPlan, WholeStageCodegenExec}
 import org.apache.spark.sql.hive.{SnappyAnalyzer, SnappyHiveExternalCatalog, SnappySessionState}
 import org.apache.spark.sql.internal.{SQLConf, SnappySharedState}
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
@@ -510,6 +510,11 @@ trait SparkInternals extends Logging {
       filters: Seq[Filter], handledFilters: Seq[Filter], rdd: RDD[InternalRow],
       metadata: Map[String, String], relation: BaseRelation,
       tableIdentifier: Option[TableIdentifier]): RowDataSourceScanExec
+
+  /**
+   * Get the table identifier for given DataSourceScanExec.
+   */
+  def tableIdentifier(scan: DataSourceScanExec): Option[TableIdentifier]
 
   /**
    * Create a new [[CodegenSparkFallback]] with the given child.

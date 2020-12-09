@@ -3,7 +3,6 @@
 Before you configure the SnappyData cluster, check the [system requirements](/install/system_requirements.md). In case you have not yet provisioned SnappyData, you can follow the instructions [here](/install.md).  
 TIBCO recommends that you have at least **8 GB** of memory and **4 cores** available even for simple experimentation with SnappyData.
 
-
 ## Launching Single Node Cluster with Default Configuration
 If you want to launch the cluster either on Amazon EC2 or on a Kubernetes cluster, you can follow the instructions listed [here (AWS)](/install/setting_up_cluster_on_amazon_web_services.md) and [here (Kubernetes)](/kubernetes.md)
 
@@ -12,7 +11,7 @@ If you are launching on a single node, for example, on your laptop or on a linux
 ```
 ./sbin/snappy-start-all.sh 
 ```
-This launches a single [locator](should point to concepts), [lead](should point to concepts) and a [data server](should point to concepts). You can go to the following URL on your browser to view the cluster dashboard:
+This launches a single [locator](/configuring_cluster/configuring_cluster.md#locator), [lead](/configuring_cluster/configuring_cluster.md#lead) and a [data server](/configuring_cluster/configuring_cluster.md#dataserver). You can go to the following URL on your browser to view the cluster dashboard:
 
 **http://(localhost or hostname or machineIP):5050** 
 
@@ -106,7 +105,6 @@ The following core properties must be set in the **conf/leads** file:
 |   heap-size     |  Sets the maximum heap size for the Java VM, using SnappyData default resource manager settings. </br>For example, `-heap-size=8g` </br> It is recommended to allocate minimum **6-8 GB** of heap size per lead node. If you use the `-heap-size` option, by default SnappyData sets the critical-heap-percentage to 95% of the heap size, and the `eviction-heap-percentage` to 85.5% of the `critical-heap-percentage`. </br>SnappyData also sets resource management properties for eviction and garbage collection if the JVM supports them.       |   |
 |  dir      |   Working directory of the member that contains the SnappyData Server status file and the default location for the log file, persistent files, data dictionary, and so forth.   | <product_home>/work  |
 |   classpath     |  Location of user classes required by the SnappyData Server. This path is appended to the current classpath   | Appended to the current classpath |
-|  zeppelin.interpreter.enable=true    |Enable the SnappyData Zeppelin interpreter. Refer [How to use Apache Zeppelin with SnappyData](/howto/use_apache_zeppelin_with_snappydata.md) |   |
 |   spark.executor.cores     | The number of cores to use on each server.    |   |
 |    spark.jars    |        |   |
 
@@ -119,10 +117,10 @@ localhost   -dir=/opt/snappydata/data/lead -heap-size=6g
 ```
 You can add a line for each of the Lead members that you want to launch. Typically only one. In production, you may launch two.
 
-In the following configuration, you are specifying the [number of cores to use on each server](/best_practices/setup_cluster.md#computenoscores) as well as enabling the SnappyData Zeppelin interpreter:
+In the following configuration, you are specifying the [number of cores to use on each server](/best_practices/setup_cluster.md#computenoscores):
 
 ```
-localhost -spark.executor.cores=16 -zeppelin.interpreter.enable=true
+localhost -spark.executor.cores=16
 ```
 
 !!!Tip

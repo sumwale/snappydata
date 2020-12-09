@@ -33,8 +33,8 @@ object TestUtils extends Logging {
     val sc = SnappyContext.globalSparkContext
     if (sc != null && !sc.isStopped) {
       val catalog = session.sessionCatalog
-      catalog.setCurrentDatabase(catalog.defaultSchemaName)
-      val skipSchemas = Seq(catalog.defaultSchemaName, "default", "sys", "sysibm")
+      catalog.setCurrentDatabase(catalog.defaultDbName)
+      val skipSchemas = Seq(catalog.defaultDbName, "default", "sys", "sysibm")
       val userSchemas = catalog.listDatabases().filterNot(skipSchemas.contains)
       if (userSchemas.nonEmpty) {
         userSchemas.foreach { s =>
@@ -48,9 +48,9 @@ object TestUtils extends Logging {
           }
         }
       }
-      catalog.dropAllSchemaObjects(catalog.defaultSchemaName,
+      catalog.dropAllDatabaseObjects(catalog.defaultDbName,
         ignoreIfNotExists = true, cascade = true)
-      catalog.dropAllSchemaObjects("default", ignoreIfNotExists = true, cascade = true)
+      catalog.dropAllDatabaseObjects("default", ignoreIfNotExists = true, cascade = true)
       catalog.clearTempTables()
     }
   }

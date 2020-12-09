@@ -144,7 +144,7 @@ private[sql] trait SnappyStrategies {
               case None =>
               case Some(joinHint) =>
                 applyJoinHint(joinHint, joinType, leftKeys, rightKeys, condition,
-                  left, right, joins.BuildRight, right, canBuildRight) match {
+                  left, right, joins.BuildRight, right, canBuildRight(right)) match {
                   case Nil => snappySession.addWarning(new SQLWarning(s"Plan hint " +
                       s"${QueryHint.JoinType}=$joinHint for ${right.simpleString} cannot be " +
                       s"applied for ${joinType.sql} JOIN on columns=$rightKeys. " +
@@ -157,7 +157,7 @@ private[sql] trait SnappyStrategies {
               case None =>
               case Some(joinHint) =>
                 applyJoinHint(joinHint, joinType, leftKeys, rightKeys, condition,
-                  left, right, joins.BuildLeft, left, canBuildLeft) match {
+                  left, right, joins.BuildLeft, left, canBuildLeft(left)) match {
                   case Nil => snappySession.addWarning(new SQLWarning(s"Plan hint " +
                       s"${QueryHint.JoinType}=$joinHint for ${left.simpleString} cannot be " +
                       s"applied for ${joinType.sql} " +
@@ -167,20 +167,20 @@ private[sql] trait SnappyStrategies {
             }
 
             // check for hash join with replicated table first
-            if (canBuildRight(joinType) && allowsReplicatedJoin(right)) {
+            if (canBuildRight(right)(joinType) && allowsReplicatedJoin(right)) {
               makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                 joinType, joins.BuildRight, replicatedTableJoin = true)
-            } else if (canBuildLeft(joinType) && allowsReplicatedJoin(left)) {
+            } else if (canBuildLeft(left)(joinType) && allowsReplicatedJoin(left)) {
               makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                 joinType, joins.BuildLeft, replicatedTableJoin = true)
             }
             // check for collocated joins before going for broadcast
             else if (isCollocatedJoin(joinType, left, leftKeys, right, rightKeys)) {
-              val buildLeft = canBuildLeft(joinType) && canBuildLocalHashMap(left, conf)
+              val buildLeft = canBuildLeft(left)(joinType) && canBuildLocalHashMap(left, conf)
               if (buildLeft && getStats(left).sizeInBytes < getStats(right).sizeInBytes) {
                 makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                   joinType, joins.BuildLeft, replicatedTableJoin = false)
-              } else if (canBuildRight(joinType) && canBuildLocalHashMap(right, conf)) {
+              } else if (canBuildRight(right)(joinType) && canBuildLocalHashMap(right, conf)) {
                 makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                   joinType, joins.BuildRight, replicatedTableJoin = false)
               } else if (buildLeft) {
@@ -193,7 +193,7 @@ private[sql] trait SnappyStrategies {
               } else Nil
             }
             // broadcast joins preferred over exchange+local hash join or SMJ
-            else if (canBuildRight(joinType) && canBroadcast(right, conf)) {
+            else if (canBuildRight(right)(joinType) && canBroadcast(right, conf)) {
               if (skipBroadcastRight(joinType, left, right, conf)) {
                 joins.BroadcastHashJoinExec(leftKeys, rightKeys, joinType,
                   joins.BuildLeft, condition, planLater(left), planLater(right)) :: Nil
@@ -201,14 +201,14 @@ private[sql] trait SnappyStrategies {
                 joins.BroadcastHashJoinExec(leftKeys, rightKeys, joinType,
                   joins.BuildRight, condition, planLater(left), planLater(right)) :: Nil
               }
-            } else if (canBuildLeft(joinType) && canBroadcast(left, conf)) {
+            } else if (canBuildLeft(left)(joinType) && canBroadcast(left, conf)) {
               joins.BroadcastHashJoinExec(leftKeys, rightKeys, joinType,
                 joins.BuildLeft, condition, planLater(left), planLater(right)) :: Nil
             }
             // prefer local hash join after exchange over sort merge join if size is small enough
-            else if (canBuildRight(joinType) && canBuildLocalHashMap(right, conf) ||
+            else if (canBuildRight(right)(joinType) && canBuildLocalHashMap(right, conf) ||
                 !RowOrdering.isOrderable(leftKeys)) {
-              if (canBuildLeft(joinType) && canBuildLocalHashMap(left, conf) &&
+              if (canBuildLeft(left)(joinType) && canBuildLocalHashMap(left, conf) &&
                   getStats(left).sizeInBytes < getStats(right).sizeInBytes) {
                 makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                   joinType, joins.BuildLeft, replicatedTableJoin = false)
@@ -216,7 +216,7 @@ private[sql] trait SnappyStrategies {
                 makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                   joinType, joins.BuildRight, replicatedTableJoin = false)
               }
-            } else if (canBuildLeft(joinType) && canBuildLocalHashMap(left, conf) ||
+            } else if (canBuildLeft(left)(joinType) && canBuildLocalHashMap(left, conf) ||
                 !RowOrdering.isOrderable(leftKeys)) {
               makeLocalHashJoin(leftKeys, rightKeys, left, right, condition,
                 joinType, joins.BuildLeft, replicatedTableJoin = false)
@@ -293,7 +293,7 @@ private[sql] trait SnappyStrategies {
         if (checkBroadcastJoin) {
           // check if one of the sides will be broadcast, then in that case
           // indicate that collocation is still possible for joins further down
-          if (canBuildRight(joinType) && canBroadcast(rightPlan, conf)) {
+          if (canBuildRight(rightPlan)(joinType) && canBroadcast(rightPlan, conf)) {
             if (skipBroadcastRight(joinType, leftPlan, rightPlan, conf)) {
               // resulting partitioning will be of the side not broadcast
               (rightCols, rightKeyOrder, rightNumPartitions)
@@ -301,7 +301,7 @@ private[sql] trait SnappyStrategies {
               // resulting partitioning will be of the side not broadcast
               (leftCols, leftKeyOrder, leftNumPartitions)
             }
-          } else if (canBuildLeft(joinType) && canBroadcast(leftPlan, conf)) {
+          } else if (canBuildLeft(leftPlan)(joinType) && canBroadcast(leftPlan, conf)) {
             // resulting partitioning will be of the side not broadcast
             (rightCols, rightKeyOrder, rightNumPartitions)
           } else (Nil, Nil, -1)
@@ -357,7 +357,7 @@ private[sql] object JoinStrategy extends SparkSupport {
 
   def skipBroadcastRight(joinType: JoinType, left: LogicalPlan,
       right: LogicalPlan, conf: SQLConf): Boolean = {
-    canBuildLeft(joinType) && canBroadcast(left, conf) &&
+    canBuildLeft(left)(joinType) && canBroadcast(left, conf) &&
         getStats(left).sizeInBytes < getStats(right).sizeInBytes
   }
 
@@ -384,13 +384,8 @@ private[sql] object JoinStrategy extends SparkSupport {
    * Matches a plan whose output should be small enough to be used in broadcast join.
    */
   def canBroadcast(plan: LogicalPlan, conf: SQLConf): Boolean = {
-    val stats = getStats(plan)
-    plan.find {
-      case lr: LogicalRelation if lr.relation.isInstanceOf[SamplingRelation] => true
-      case _ => false
-    }.isEmpty && (
-        internals.isBroadcastable(plan) ||
-            stats.sizeInBytes <= conf.autoBroadcastJoinThreshold)
+    internals.isBroadcastable(plan) ||
+        getStats(plan).sizeInBytes <= conf.autoBroadcastJoinThreshold
   }
 
   def getMaxHashJoinSize(conf: SQLConf): Long = {
@@ -402,13 +397,17 @@ private[sql] object JoinStrategy extends SparkSupport {
    * Matches a plan whose size is small enough to build a hash table.
    */
   def canBuildLocalHashMap(plan: LogicalPlan, conf: SQLConf): Boolean = {
-    getStats(plan).sizeInBytes <= getMaxHashJoinSize(conf)
+    getStats(plan).sizeInBytes <= getMaxHashJoinSize(conf) && plan.find {
+      case lr: LogicalRelation if lr.relation.isInstanceOf[SamplingRelation] &&
+          !lr.relation.asInstanceOf[SamplingRelation].canBeOnBuildSide => true
+      case _ => false
+    }.isEmpty
   }
 
   def isReplicatedJoin(plan: LogicalPlan): Boolean = plan match {
     case ExtractEquiJoinKeys(joinType, _, _, _, left, right) =>
-      (canBuildRight(joinType) && allowsReplicatedJoin(right)) ||
-          (canBuildLeft(joinType) && allowsReplicatedJoin(left))
+      (canBuildRight(right)(joinType) && allowsReplicatedJoin(right)) ||
+          (canBuildLeft(left)(joinType) && allowsReplicatedJoin(left))
     case _ => false
   }
 
@@ -416,26 +415,34 @@ private[sql] object JoinStrategy extends SparkSupport {
     plan match {
       case PhysicalScan(_, _, child) => child match {
         case lr: LogicalRelation if lr.relation.isInstanceOf[PartitionedDataSourceScan] =>
-          !lr.relation.asInstanceOf[PartitionedDataSourceScan].isPartitioned &&
-              !lr.relation.isInstanceOf[SamplingRelation]
+          !lr.relation.asInstanceOf[PartitionedDataSourceScan].isPartitioned /* &&
+              !lr.relation.isInstanceOf[SamplingRelation] */
         case _: Filter | _: Project | _: LocalLimit => allowsReplicatedJoin(child.children.head)
         case ExtractEquiJoinKeys(joinType, _, _, _, left, right) =>
           allowsReplicatedJoin(left) && allowsReplicatedJoin(right) &&
-              (canBuildLeft(joinType) || canBuildRight(joinType))
+              (canBuildLeft(left)(joinType) || canBuildRight(right)(joinType))
         case _ => false
       }
       case _ => false
     }
   }
 
-  def canBuildRight(joinType: JoinType): Boolean = joinType match {
-    case Inner | LeftOuter | LeftSemi | LeftAnti => true
+  def canBuildRight(right: LogicalPlan)(joinType: JoinType): Boolean = joinType match {
+    case Inner | LeftOuter | LeftSemi | LeftAnti => right.find {
+      case lr: LogicalRelation if lr.relation.isInstanceOf[SamplingRelation] &&
+          !lr.relation.asInstanceOf[SamplingRelation].canBeOnBuildSide => true
+      case _ => false
+    }.isEmpty
     case _: ExistenceJoin => true
     case _ => false
   }
 
-  def canBuildLeft(joinType: JoinType): Boolean = joinType match {
-    case Inner | RightOuter => true
+  def canBuildLeft(left: LogicalPlan)(joinType: JoinType): Boolean = joinType match {
+    case Inner | RightOuter => left.find {
+      case lr: LogicalRelation if lr.relation.isInstanceOf[SamplingRelation] &&
+          !lr.relation.asInstanceOf[SamplingRelation].canBeOnBuildSide => true
+      case _ => false
+    }.isEmpty
     case _ => false
   }
 }

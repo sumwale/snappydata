@@ -38,9 +38,9 @@ case class RowDeleteExec(child: SparkPlan, resolvedName: String,
 
   override protected def doProduce(ctx: CodegenContext): String = {
     val sql = new StringBuilder
-    sql.append("DELETE FROM ").append(quotedName(resolvedName, escapeQuotes = true))
+    sql.append("DELETE FROM ").append(quotedName(resolvedName))
         .append(" WHERE ")
-    JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.map(_.name), escapeQuotes = true)
+    JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.map(_.name))
     super.doProduce(ctx, sql.toString())
   }
 

@@ -45,47 +45,28 @@ import org.apache.spark.sql.{AnalysisException, RuntimeConfig, SnappyContext, Sn
 
 trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
 
-  // Overrides for better exceptions that say "schema" instead of "database"
-
-  override def requireDbExists(schema: String): Unit = {
-    if (!databaseExists(schema)) throw schemaNotFoundException(schema)
+  override def requireDbExists(db: String): Unit = {
+    if (!databaseExists(db)) throw databaseNotFoundException(db)
   }
 
-  override def requireTableExists(schema: String, table: String): Unit = {
-    if (!tableExists(schema, table)) {
-      throw new TableNotFoundException(schema, table)
-    }
+  override def requireTableExists(db: String, table: String): Unit = {
+    if (!tableExists(db, table)) throw new TableNotFoundException(db, table)
   }
 
-  override protected def requireFunctionExists(schema: String, funcName: String): Unit = {
-    if (!functionExists(schema, funcName)) {
-      throw Utils.analysisException(s"Undefined function '$funcName'. This function is neither " +
-          s"a temporary function nor a permanent function registered in the schema '$schema'.")
-    }
-  }
-
-  override protected def requireFunctionNotExists(schema: String, funcName: String): Unit = {
-    if (functionExists(schema, funcName)) {
-      throw Utils.analysisException(s"Function '$funcName' already exists in schema '$schema'")
-    }
-  }
-
-  // End overrides for exception messages
-
-  protected def getTableImpl(schema: String, table: String): CatalogTable = {
-    if (schema == SYS_SCHEMA) {
+  protected def getTableImpl(db: String, table: String): CatalogTable = {
+    if (db == SYS_DATABASE) {
       // check for a system table/VTI in store
       val session = Utils.getActiveSession
-      val conn = ConnectionUtil.getPooledConnection(schema, new ConnectionConf(
+      val conn = ConnectionUtil.getPooledConnection(db, new ConnectionConf(
         ExternalStoreUtils.validateAndGetAllProps(session, ExternalStoreUtils.emptyCIMutableMap)))
       try {
         if (table == MEMBERS_VTI || JdbcExtendedUtils.tableExistsInMetaData(
-          schema, table, conn, SysVTIs.LOCAL_VTI)) {
-          val cols = JdbcExtendedUtils.getTableSchema(SYS_SCHEMA, table, conn, session)
-          CatalogTable(identifier = TableIdentifier(table, Some(SYS_SCHEMA)),
+          db, table, conn, SysVTIs.LOCAL_VTI)) {
+          val cols = JdbcExtendedUtils.getTableDatabase(SYS_DATABASE, table, conn, session)
+          CatalogTable(identifier = TableIdentifier(table, Some(SYS_DATABASE)),
             tableType = CatalogTableType.EXTERNAL,
             storage = CatalogStorageFormat.empty.copy(
-              properties = Map(DBTABLE_PROPERTY -> s"$schema.$table")),
+              properties = Map(DBTABLE_PROPERTY -> s"$db.$table")),
             schema = cols,
             provider = Some(SnappyParserConsts.ROW_SOURCE),
             partitionColumnNames = Nil,
@@ -93,42 +74,42 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
             createTime = 0,
             lastAccessTime = 0,
             unsupportedFeatures = Nil)
-        } else throw new TableNotFoundException(schema, table)
+        } else throw new TableNotFoundException(db, table)
       } finally {
         conn.close()
       }
     } else {
       try {
-        getCachedCatalogTable(schema, table)
+        getCachedCatalogTable(db, table)
       } catch {
         case e@(_: UncheckedExecutionException | _: ExecutionException) => throw e.getCause
       }
     }
   }
 
-  def getTableIfExists(schema: String, table: String): Option[CatalogTable] =
-    SnappyExternalCatalog.getTableIfExists(catalog = this, schema, table)
+  def getTableIfExists(db: String, table: String): Option[CatalogTable] =
+    SnappyExternalCatalog.getTableIfExists(catalog = this, db, table)
 
-  protected def getCachedCatalogTable(schema: String, table: String): CatalogTable
+  protected def getCachedCatalogTable(db: String, table: String): CatalogTable
 
-  def systemSchemaDefinition: CatalogDatabase =
-    internals.newCatalogDatabase(SYS_SCHEMA, "System schema", SYS_SCHEMA, Map.empty) // dummy path
+  def systemDatabaseDefinition: CatalogDatabase =
+    internals.newCatalogDatabase(SYS_DATABASE, "System database", SYS_DATABASE, Map.empty)
 
   /**
    * Get RelationInfo for given table with underlying region in embedded mode.
    */
-  def getRelationInfo(schema: String, table: String,
+  def getRelationInfo(db: String, table: String,
       isRowTable: Boolean): (RelationInfo, Option[LocalRegion])
 
   /**
    * Get all the dependent objects for a given catalog object.
    */
-  def getDependents(schema: String, table: String,
+  def getDependents(db: String, table: String,
       catalogTable: CatalogTable, includeTypes: Seq[CatalogObjectType.Type],
       excludeTypes: Seq[CatalogObjectType.Type]): Seq[CatalogTable] = {
     // for older releases having TABLETYPE property, use full scan else use dependent relations
     if (catalogTable.properties.contains(TABLETYPE_PROPERTY)) {
-      val fullTableName = s"$schema.$table"
+      val fullTableName = s"$db.$table"
       getAllTables().filter { t =>
         val tableType = CatalogObjectType.getTableType(t)
         val include = if (includeTypes.nonEmpty) includeTypes.contains(tableType)
@@ -140,7 +121,7 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
       }
     } else {
       // search in the dependent relations property of catalog
-      getDependentsFromProperties(schema, catalogTable.properties, includeTypes, excludeTypes)
+      getDependentsFromProperties(db, catalogTable.properties, includeTypes, excludeTypes)
     }
   }
 
@@ -149,14 +130,14 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
    * for older releases that may lack appropriate catalog entries for dependent relations.
    * Use [[getDependents]] for cases where that might be possible.
    */
-  def getDependentsFromProperties(schema: String, table: String,
+  def getDependentsFromProperties(db: String, table: String,
       includeTypes: Seq[CatalogObjectType.Type] = Nil,
       excludeTypes: Seq[CatalogObjectType.Type] = Nil): Seq[CatalogTable] = {
-    getDependentsFromProperties(schema, getTable(schema, table).properties,
+    getDependentsFromProperties(db, getTable(db, table).properties,
       includeTypes, excludeTypes)
   }
 
-  protected def getDependentsFromProperties(schema: String, properties: Map[String, String],
+  protected def getDependentsFromProperties(db: String, properties: Map[String, String],
       includeTypes: Seq[CatalogObjectType.Type],
       excludeTypes: Seq[CatalogObjectType.Type]): Seq[CatalogTable] = {
     val allDependents = SnappyExternalCatalog.getDependents(properties)
@@ -166,8 +147,8 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
     // in base table entry and actual table entry creation)
     val dependents = new mutable.ArrayBuffer[CatalogTable]
     for (dep <- allDependents) {
-      val (depSchema, depTable) = getTableWithSchema(dep, schema)
-      getTableIfExists(depSchema, depTable) match {
+      val (depDb, depTable) = getTableWithDatabase(dep, db)
+      getTableIfExists(depDb, depTable) match {
         case None => // skip tables no longer present
         case Some(t) =>
           val tableType = CatalogObjectType.getTableType(t)
@@ -179,39 +160,39 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
     dependents
   }
 
-  def createPolicy(schemaName: String, policyName: String, targetTable: String,
+  def createPolicy(dbName: String, policyName: String, targetTable: String,
       policyFor: String, policyApplyTo: Seq[String], expandedPolicyApplyTo: Seq[String],
       owner: String, filterString: String): Unit
 
   /**
    * Get the list of policies defined for a given table
    *
-   * @param schema     schema name of the table
+   * @param db         database of the table
    * @param table      name of the table
    * @param properties CatalogTable.properties for the table
    * @return list of policy CatalogTables
    */
-  def getPolicies(schema: String, table: String,
+  def getPolicies(db: String, table: String,
       properties: Map[String, String]): Seq[CatalogTable] = {
     // for older releases having TABLETYPE property, use full scan else use dependent relations
     if (properties.contains(TABLETYPE_PROPERTY)) {
-      val fullTableName = s"$schema.$table"
+      val fullTableName = s"$db.$table"
       getAllTables().filter(t => CatalogObjectType.isPolicy(t) &&
           t.properties(PolicyProperties.targetTable).equalsIgnoreCase(fullTableName))
     } else {
       // search policies in the dependent relations
-      getDependentsFromProperties(schema, properties, CatalogObjectType.Policy :: Nil, Nil)
+      getDependentsFromProperties(db, properties, CatalogObjectType.Policy :: Nil, Nil)
     }
   }
 
   protected def alterTableImpl(table: CatalogTable): Unit
 
   /**
-   * Get all the tables in the catalog skipping given schema names. By default
-   * the inbuilt SYS schema is skipped.
+   * Get all the tables in the catalog skipping given database names. By default
+   * the inbuilt SYS database is skipped.
    */
-  def getAllTables(skipSchemas: Seq[String] = SYS_SCHEMA :: Nil): Seq[CatalogTable] =
-    SnappyExternalCatalog.getAllTables(catalog = this, skipSchemas)
+  def getAllTables(skipDatabases: Seq[String] = SYS_DATABASE :: Nil): Seq[CatalogTable] =
+    SnappyExternalCatalog.getAllTables(catalog = this, skipDatabases)
 
   /**
    * Check for baseTable in both properties and storage.properties (older releases used a mix).
@@ -238,9 +219,9 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
     getBaseTable(table) match {
       case None =>
       case Some(baseTable) =>
-        val withSchema = getTableWithSchema(Utils.toLowerCase(baseTable), table.database)
+        val withDatabase = getTableWithDatabase(Utils.toLowerCase(baseTable), table.database)
         // add base table to the list of relations to be invalidated
-        tableWithBase = withSchema :: tableWithBase
+        tableWithBase = withDatabase :: tableWithBase
     }
     tableWithBase
   }
@@ -255,9 +236,9 @@ trait SnappyExternalCatalog extends ExternalCatalog with SparkSupport {
 }
 
 object SnappyExternalCatalog {
-  val SYS_SCHEMA: String = "sys"
+  val SYS_DATABASE: String = "sys"
   val MEMBERS_VTI: String = "members"
-  val SPARK_DEFAULT_SCHEMA: String = SessionCatalog.DEFAULT_DATABASE
+  val SPARK_DEFAULT_DATABASE: String = SessionCatalog.DEFAULT_DATABASE
 
   // Table properties below are a mix of CatalogTable.properties and
   // CatalogTable.storage.properties due to backward compatibility reasons
@@ -277,6 +258,8 @@ object SnappyExternalCatalog {
   val DBTABLE_PROPERTY: String = JDBCOptions.JDBC_TABLE_NAME
   val BASETABLE_PROPERTY = "basetable"
   val SCHEMADDL_PROPERTY = "schemaddl"
+  // used by RecoveryService to denote a column storage table for provider=oplog
+  val IS_COLUMN_TABLE = "is_column_table"
 
   // obsolete properties to indicate column table indexes which were experimental and untested
   val INDEXED_TABLE = "INDEXED_TABLE"
@@ -303,24 +286,24 @@ object SnappyExternalCatalog {
     }
   }
 
-  def getTableWithSchema(table: String, defaultSchema: String): (String, String) = {
+  def getTableWithDatabase(table: String, defaultDb: String): (String, String) = {
     val dotIndex = table.indexOf('.')
     if (dotIndex > 0) table.substring(0, dotIndex) -> table.substring(dotIndex + 1)
-    else defaultSchema -> table
+    else defaultDb -> table
   }
 
-  def checkSchemaPermission(schema: String, table: String, defaultUser: String,
+  def checkDatabasePermission(db: String, table: String, defaultUser: String,
       conf: RuntimeConfig = null, ignoreIfNotExists: Boolean = false): String = {
     val callbacks = ToolsCallbackInit.toolsCallback
     if (callbacks ne null) {
       // allow creating entry for dummy table by anyone
-      if (!(schema.equalsIgnoreCase(JdbcExtendedUtils.SYSIBM_SCHEMA)
+      if (!(db.equalsIgnoreCase(JdbcExtendedUtils.SYSIBM_DATABASE)
           && table.equalsIgnoreCase(JdbcExtendedUtils.DUMMY_TABLE_NAME))) {
         val user = if (defaultUser eq null) {
-          conf.get(Attribute.USERNAME_ATTR, Constant.DEFAULT_SCHEMA)
+          conf.get(Attribute.USERNAME_ATTR, Constant.DEFAULT_DATABASE)
         } else defaultUser
         try {
-          callbacks.checkSchemaPermission(schema, user)
+          callbacks.checkDatabasePermission(db, user)
         } catch {
           // ignore permission check failure if not present in store and ignoreIfNotExists is set
           case sqle: SQLException if ignoreIfNotExists &&
@@ -330,35 +313,33 @@ object SnappyExternalCatalog {
     } else defaultUser
   }
 
-  def getTableIfExists(catalog: ExternalCatalog, schema: String,
+  def getTableIfExists(catalog: ExternalCatalog, db: String,
       table: String): Option[CatalogTable] = {
     try {
-      Some(catalog.getTable(schema, table))
+      Some(catalog.getTable(db, table))
     } catch {
       case _: NoSuchTableException => None
     }
   }
 
   /**
-   * Get all the tables in the catalog skipping given schema names. By default
-   * the inbuilt SYS schema is skipped.
+   * Get all the tables in the catalog skipping given database names. By default
+   * the inbuilt SYS database is skipped.
    */
-  def getAllTables(catalog: ExternalCatalog, skipSchemas: Seq[String]): Seq[CatalogTable] = {
-    catalog.listDatabases().flatMap(schema =>
-      if (skipSchemas.nonEmpty && skipSchemas.contains(schema)) Nil
-      else catalog.listTables(schema).flatMap(table => getTableIfExists(catalog, schema, table)))
+  def getAllTables(catalog: ExternalCatalog, skipDatabases: Seq[String]): Seq[CatalogTable] = {
+    catalog.listDatabases().flatMap(db =>
+      if (skipDatabases.nonEmpty && skipDatabases.contains(db)) Nil
+      else catalog.listTables(db).flatMap(table => getTableIfExists(catalog, db, table)))
   }
 
-  def schemaNotFoundException(schema: String): AnalysisException = {
-    if (SnappyContext.hasHiveSession) {
-      Utils.analysisException(s"Schema or database '$schema' not found")
-    } else Utils.analysisException(s"Schema '$schema' not found")
+  def databaseNotFoundException(db: String): AnalysisException = {
+    Utils.analysisException(s"Database/Schema '$db' not found")
   }
 
   def objectExistsException(tableIdentifier: TableIdentifier,
       objectType: CatalogObjectType.Type): AnalysisException = {
     Utils.analysisException(s"Object with name '${tableIdentifier.table}' (requested type = " +
-        s"$objectType) already exists in schema/database '${tableIdentifier.database}'")
+        s"$objectType) already exists in database/schema '${tableIdentifier.database}'")
   }
 }
 
@@ -367,6 +348,7 @@ object CatalogObjectType extends Enumeration {
 
   val Row: Type = Value("ROW")
   val Column: Type = Value("COLUMN")
+  val Oplog: Type = Value("OPLOG")
   val View: Type = Value("VIEW")
   val Index: Type = Value("INDEX")
   val Stream: Type = Value("STREAM")

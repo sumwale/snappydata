@@ -29,6 +29,7 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortDirection}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.aqp.SampleInsertExec
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils.CaseInsensitiveMutableHashMap
 import org.apache.spark.sql.execution.columnar.impl.BaseColumnFormatRelation
 import org.apache.spark.sql.execution.datasources.LogicalRelation
@@ -55,7 +56,21 @@ trait PlanInsertableRelation extends DestroyRelation with InsertableRelation {
    * Get a spark plan for insert. The result of SparkPlan execution should
    * be a count of number of inserted rows.
    */
-  def getInsertPlan(relation: LogicalRelation, child: SparkPlan): SparkPlan
+  def getInsertPlan(relation: LogicalRelation, child: SparkPlan): SparkPlan = {
+    val baseTableInsert = getBasicInsertPlan(relation, child)
+    val session = child.sqlContext.sparkSession.asInstanceOf[SnappySession]
+    val tableIdentifier = session.tableIdentifier(resolvedName)
+    val sampleRelations = session.sessionCatalog.getSampleRelations(tableIdentifier)
+    if (sampleRelations.isEmpty) {
+      baseTableInsert
+    } else {
+      SampleInsertExec(baseTableInsert, child, tableIdentifier, sampleRelations, relation.schema)
+    }
+  }
+
+  def getBasicInsertPlan(relation: LogicalRelation, child: SparkPlan): SparkPlan
+
+  def resolvedName: String
 }
 
 trait RowPutRelation extends DestroyRelation {
@@ -201,6 +216,8 @@ trait SamplingRelation extends BaseRelation with SchemaInsertableRelation {
    * True if underlying sample table is using a row table as reservoir store.
    */
   def isReservoirAsRegion: Boolean
+
+  def canBeOnBuildSide: Boolean
 }
 
 @DeveloperApi
@@ -367,8 +384,7 @@ trait SnappyTableRelation extends DestroyRelation with RowLevelSecurityRelation 
   def isRowLevelSecurityEnabled: Boolean = {
     val conn = connFactory()
     try {
-      JdbcExtendedUtils.isRowLevelSecurityEnabled(resolvedName,
-        conn, dialect, sqlContext)
+      JdbcExtendedUtils.isRowLevelSecurityEnabled(resolvedName, conn)
     } catch {
       case se: java.sql.SQLException =>
         if (se.getMessage.contains("No suitable driver found")) {
@@ -397,7 +413,7 @@ trait SnappyTableRelation extends DestroyRelation with RowLevelSecurityRelation 
     if (fetchFromStore) {
       val conn = ConnectionUtil.getPooledConnection(schemaName, new ConnectionConf(connProperties))
       try {
-        _schema = JdbcExtendedUtils.getTableSchema(schemaName, tableName, conn, Some(session))
+        _schema = JdbcExtendedUtils.getTableDatabase(schemaName, tableName, conn, Some(session))
       } finally {
         conn.close()
       }

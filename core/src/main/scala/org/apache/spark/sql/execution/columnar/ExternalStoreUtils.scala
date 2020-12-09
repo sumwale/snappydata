@@ -42,11 +42,12 @@ import org.apache.spark.scheduler.local.LocalSchedulerBackend
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodeAndComment, CodeFormatter, CodegenContext}
-import org.apache.spark.sql.catalyst.expressions.{Attribute, BinaryExpression, DynamicInSet, Expression, TokenLiteral}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, BinaryComparison, BinaryExpression, DynamicInSet, Expression, TokenLiteral}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.columnar.impl.JDBCSourceAsColumnarStore
 import org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry
 import org.apache.spark.sql.execution.{BufferedRowIterator, CodegenSupport, CodegenSupportOnExecutor, ConnectionPool, RefreshMetadata}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.jdbc.{JdbcDialect, JdbcDialects}
 import org.apache.spark.sql.row.SnappyStoreDialect
 import org.apache.spark.sql.sources.{ConnectionProperties, ExternalSchemaRelationProvider, JdbcExtendedDialect, JdbcExtendedUtils}
@@ -165,23 +166,23 @@ object ExternalStoreUtils extends SparkSupport {
       extends mutable.Map[String, T] with Serializable {
 
     val baseMap = new mutable.HashMap[String, T]
-    baseMap ++= map.map(kv => kv.copy(_1 = kv._1.toLowerCase))
+    baseMap ++= map.map(kv => kv.copy(_1 = Utils.toLowerCase(kv._1)))
 
-    override def get(k: String): Option[T] = baseMap.get(k.toLowerCase)
+    override def get(k: String): Option[T] = baseMap.get(Utils.toLowerCase(k))
 
-    override def put(k: String, v: T): Option[T] = baseMap.put(k.toLowerCase, v)
+    override def put(k: String, v: T): Option[T] = baseMap.put(Utils.toLowerCase(k), v)
 
-    override def remove(k: String): Option[T] = baseMap.remove(k.toLowerCase)
+    override def remove(k: String): Option[T] = baseMap.remove(Utils.toLowerCase(k))
 
     override def iterator: Iterator[(String, T)] = baseMap.iterator
 
     override def +=(kv: (String, T)): this.type = {
-      baseMap += kv.copy(_1 = kv._1.toLowerCase)
+      baseMap += kv.copy(_1 = Utils.toLowerCase(kv._1))
       this
     }
 
     override def -=(key: String): this.type = {
-      baseMap -= key.toLowerCase
+      baseMap -= Utils.toLowerCase(key)
       this
     }
   }
@@ -235,6 +236,10 @@ object ExternalStoreUtils extends SparkSupport {
 
   def getExpandedGranteesIterator(grantees: Seq[String]): Iterator[String] = {
     new GranteeIterator(grantees.asJava, null, true, -1, -1, -1, null, null).asScala
+  }
+
+  def escapeSingleQuotedString(str: String): String = {
+    str.replace("'", s"\\\'")
   }
 
   def defaultStoreURL(sparkContext: Option[SparkContext]): String = sparkContext match {
@@ -373,8 +378,8 @@ object ExternalStoreUtils extends SparkSupport {
 
       // Hikari only take 'username'. So does Tomcat
       def securePoolProps(props: Map[String, String]): Map[String, String] = {
-        props + (ClientAttribute.USERNAME_ALT.toLowerCase -> user) + (ClientAttribute.PASSWORD ->
-            password)
+        props + (Utils.toLowerCase(ClientAttribute.USERNAME_ALT) -> user) +
+            (ClientAttribute.PASSWORD -> password)
       }
 
       ConnectionProperties(url, driver, dialect, securePoolProps(poolProps),
@@ -385,7 +390,7 @@ object ExternalStoreUtils extends SparkSupport {
     }
   }
 
-  def getCredentials(session: SparkSession, prefix: String = ""): (String, String) = {
+  def getCredentials(session: SparkSession): (String, String) = {
     for (prefix <- storePropertyPrefixes) {
       val userProperty =
         if (prefix.isEmpty) ClientAttribute.USERNAME
@@ -421,10 +426,10 @@ object ExternalStoreUtils extends SparkSupport {
   }
 
   /** check if the DataSource implements ExternalSchemaRelationProvider */
-  def isExternalSchemaRelationProvider(provider: String, session: SparkSession): Boolean = {
+  def isExternalSchemaRelationProvider(provider: String, conf: => SQLConf): Boolean = {
     try {
       classOf[ExternalSchemaRelationProvider].isAssignableFrom(
-        internals.lookupDataSource(provider, session.sessionState.conf))
+        internals.lookupDataSource(provider, conf))
     } catch {
       case NonFatal(_) => false
     }
@@ -464,6 +469,7 @@ object ExternalStoreUtils extends SparkSupport {
     // Spark execution engine is much faster at filter apply (though
     //   its possible that not all indexed columns will be used for
     //   index lookup still push down all to keep things simple)
+    case _@BinaryComparison(_: Attribute, _: Attribute) => None
     case expressions.EqualTo(a: Attribute, v) =>
       checkIndexedColumn(a, indexedCols).map(expressions.EqualTo(_, v))
     case expressions.EqualTo(v, a: Attribute) =>
@@ -564,12 +570,10 @@ object ExternalStoreUtils extends SparkSupport {
     }
   }
 
-  def getAndSetTotalPartitions(session: SnappySession,
-      parameters: mutable.Map[String, String],
+  def getAndSetTotalPartitions(parameters: mutable.Map[String, String],
       forManagedTable: Boolean, forColumnTable: Boolean = true,
-      forSampleTable: Boolean = false): Int = {
-
-    parameters.getOrElse(BUCKETS, {
+      forSampleTable: Boolean = false): Int = parameters.get(BUCKETS) match {
+    case None =>
       val partitions = if (forSampleTable) defaultSampleTableBuckets else defaultTableBuckets
       if (forManagedTable) {
         if (forColumnTable) {
@@ -580,9 +584,9 @@ object ExternalStoreUtils extends SparkSupport {
           parameters += BUCKETS -> partitions
         }
       }
-      partitions
-    }).toInt
+      partitions.toInt
 
+    case Some(b) => b.toInt
   }
 
   def removeCachedObjects(sqlContext: SQLContext, table: String): Unit = {

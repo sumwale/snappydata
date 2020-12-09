@@ -19,12 +19,15 @@ package org.apache.spark.sql
 
 import java.io.File
 
+import com.pivotal.gemfirexd.Constants
+import com.pivotal.gemfirexd.internal.engine.Misc
 import com.pivotal.gemfirexd.internal.iapi.util.IdUtil
 import io.snappydata.sql.catalog.{CatalogObjectType, SnappyExternalCatalog}
 import io.snappydata.{Constant, QueryHint}
 import org.parboiled2._
 import shapeless.{::, HNil}
 
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.SnappyParserConsts.plusOrMinus
 import org.apache.spark.sql.catalyst.catalog.{BucketSpec, CatalogTableType, FunctionResource, FunctionResourceType}
 import org.apache.spark.sql.catalyst.expressions._
@@ -35,7 +38,7 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
 import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources.{CreateTempViewUsing, LogicalRelation, RefreshTable}
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.policy.PolicyProperties
 import org.apache.spark.sql.sources.JdbcExtendedUtils
 import org.apache.spark.sql.streaming.StreamPlanProvider
@@ -119,8 +122,9 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def CURRENT_DATE: Rule0 = rule { keyword(Consts.CURRENT_DATE) }
   final def CURRENT_TIMESTAMP: Rule0 = rule { keyword(Consts.CURRENT_TIMESTAMP) }
   final def CURRENT_USER: Rule0 = rule { keyword(Consts.CURRENT_USER) }
-  final def DATABASE: Rule0 = rule { keyword(Consts.DATABASE) }
-  final def DATABASES: Rule0 = rule { keyword(Consts.DATABASES) }
+  final def DATABASE: Rule0 = rule { keywords(Consts.DATABASE, Consts.SCHEMA) }
+  final def DATABASES: Rule0 = rule { keywords(Consts.DATABASES, Consts.SCHEMAS) }
+  final def DBPROPERTIES: Rule0 = rule { keyword(Consts.DBPROPERTIES) }
   final def DELETE: Rule0 = rule { keyword(Consts.DELETE) }
   final def DEPLOY: Rule0 = rule { keyword(Consts.DEPLOY) }
   final def DESC: Rule0 = rule { keyword(Consts.DESC) }
@@ -133,6 +137,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def DROP: Rule0 = rule { keyword(Consts.DROP) }
   final def DURATION: Rule0 = rule { keyword(Consts.DURATION) }
   final def ENABLE: Rule0 = rule { keyword(Consts.ENABLE) }
+  final def EXEC: Rule0 = rule { keyword(Consts.EXEC) }
   final def EXECUTE: Rule0 = rule { keyword(Consts.EXECUTE) }
   final def EXPLAIN: Rule0 = rule { keyword(Consts.EXPLAIN) }
   final def EXTENDED: Rule0 = rule { keyword(Consts.EXTENDED) }
@@ -194,6 +199,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def POSITION: Rule0 = rule { keyword(Consts.POSITION) }
   final def PRECEDING: Rule0 = rule { keyword(Consts.PRECEDING) }
   final def PRIMARY: Rule0 = rule { keyword(Consts.PRIMARY) }
+  final def PRIVILEGE: Rule0 = rule { keyword(Consts.PRIVILEGE) }
   final def PURGE: Rule0 = rule { keyword(Consts.PURGE) }
   final def PUT: Rule0 = rule { keyword(Consts.PUT) }
   final def RANGE: Rule0 = rule { keyword(Consts.RANGE) }
@@ -210,8 +216,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def ROLLUP: Rule0 = rule { keyword(Consts.ROLLUP) }
   final def ROW: Rule0 = rule { keyword(Consts.ROW) }
   final def ROWS: Rule0 = rule { keyword(Consts.ROWS) }
-  final def SCHEMA: Rule0 = rule { keyword(Consts.SCHEMA) }
-  final def SCHEMAS: Rule0 = rule { keyword(Consts.SCHEMAS) }
+  final def SCALA: Rule0 = rule { keyword(Consts.SCALA) }
   final def SECURITY: Rule0 = rule { keyword(Consts.SECURITY) }
   final def SEMI: Rule0 = rule { keyword(Consts.SEMI) }
   final def SERDE: Rule0 = rule { keyword(Consts.SERDE) }
@@ -232,7 +237,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def TABLES: Rule0 = rule { keyword(Consts.TABLES) }
   final def TABLESAMPLE: Rule0 = rule { keyword(Consts.TABLESAMPLE) }
   final def TBLPROPERTIES: Rule0 = rule { keyword(Consts.TBLPROPERTIES) }
-  final def TEMPORARY: Rule0 = rule { keyword(Consts.TEMPORARY) | keyword(Consts.TEMP) }
+  final def TEMPORARY: Rule0 = rule { keywords(Consts.TEMPORARY, Consts.TEMP) }
   final def TRAILING: Rule0 = rule { keyword(Consts.TRAILING) }
   final def TRIGGER: Rule0 = rule { keyword(Consts.TRIGGER) }
   final def TRIM: Rule0 = rule { keyword(Consts.TRIM) }
@@ -265,9 +270,28 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   final def WEEK: Rule0 = rule { intervalUnit(Consts.WEEK) }
   final def YEAR: Rule0 = rule { intervalUnit(Consts.YEAR) }
 
+  @inline
+  final def sparkContext: SparkContext =
+    if (session ne null) session.sparkContext else SnappyContext.globalSparkContext
+
+  final lazy val sqlConf: SQLConf =
+    if (session ne null) session.sessionState.conf else {
+      val conf = new SQLConf
+      val sc = sparkContext
+      if (sc ne null) {
+        sc.conf.getAll.foreach(p => conf.setConfString(p._1, p._2))
+      }
+      conf
+    }
+
   /** spark parser used for hive DDLs that are not relevant to SnappyData's builtin sources */
-  protected final lazy val sparkParser: SparkSqlParser =
-    new SparkSqlParser(session.sessionState.conf)
+  protected final lazy val sparkParser: SparkSqlParser = new SparkSqlParser(sqlConf)
+
+  @inline
+  protected final def hasHiveSupport: Boolean = {
+    if (session ne null) session.enableHiveSupport
+    else SnappySession.isHiveSupportEnabled(sqlConf.getConf(StaticSQLConf.CATALOG_IMPLEMENTATION))
+  }
 
   // DDLs, SET etc
 
@@ -293,7 +317,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   }
 
   protected def createHiveTable: Rule1[LogicalPlan] = rule {
-    test(session.enableHiveSupport) ~ capture(CREATE ~ (TEMPORARY | EXTERNAL).? ~
+    test(hasHiveSupport) ~ capture(CREATE ~ (TEMPORARY | EXTERNAL).? ~
         TABLE ~ ifNotExists ~ tableIdentifier ~ tableSchema.?) ~
         capture(USING ~ ignoreCase("hive") ~ ws | COMMENT | PARTITIONED ~ BY | CLUSTERED ~ BY |
             SKEWED ~ BY | ROW ~ FORMAT | STORED | LOCATION | TBLPROPERTIES) ~ capture(ANY.*) ~>
@@ -322,23 +346,22 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
       val provider = remaining._1 match {
         case None =>
           // use hive source as default if appropriate is set else use 'row'
-          if (session.enableHiveSupport && sparkCompatible) {
+          if (hasHiveSupport && sparkCompatible) {
             DDLUtils.HIVE_PROVIDER
           } else {
-            session.sessionState.conf.getConfString(SQLConf.DEFAULT_DATA_SOURCE_NAME.key,
-              Consts.DEFAULT_SOURCE)
+            sqlConf.getConfString(SQLConf.DEFAULT_DATA_SOURCE_NAME.key, Consts.DEFAULT_SOURCE)
           }
         case Some(p) => p
       }
       // check if hive provider is being used
-      if (provider.equalsIgnoreCase(DDLUtils.HIVE_PROVIDER) && session.enableHiveSupport) {
+      if (provider.equalsIgnoreCase(DDLUtils.HIVE_PROVIDER) && hasHiveSupport) {
         sparkParser.parsePlan(input.sliceString(0, input.length))
       } else {
         val schemaString = schemaStr.toString().trim
         // check if a relation supporting free-form schema has been used that supports
         // syntax beyond Spark support
         val (userSpecifiedSchema, schemaDDL) = if (schemaString.length > 0) {
-          if (ExternalStoreUtils.isExternalSchemaRelationProvider(provider, session)) {
+          if (ExternalStoreUtils.isExternalSchemaRelationProvider(provider, sqlConf)) {
             None -> Some(schemaString)
           } else synchronized {
             // parse the schema string expecting Spark SQL format
@@ -375,6 +398,12 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
         Consts.numericSuffix.?) ~ delimiter ~> ((s: String) => s)
   }
 
+  protected final def groupOrUser: Rule1[String] = rule {
+    LDAPGROUP ~ ':' ~ ws ~ identifier ~> ((group: String) =>
+      Constants.LDAP_GROUP_PREFIX + IdUtil.getUserAuthorizationId(group)) |
+    identifier ~> ((user: String) => IdUtil.getUserAuthorizationId(user))
+  }
+
   protected final def policyFor: Rule1[String] = rule {
     (FOR ~ capture(ALL | SELECT | UPDATE | INSERT | DELETE)).? ~> ((forOpt: Any) =>
       forOpt match {
@@ -385,14 +414,8 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
 
   protected final def policyTo: Rule1[Seq[String]] = rule {
     (TO ~
-        (capture(CURRENT_USER) |
-            (LDAPGROUP ~ ':' ~ ws ~ push(true)).? ~
-                identifier ~ ws ~> ((ldapOpt: Any, id) => ldapOpt match {
-              case None => IdUtil.getUserAuthorizationId(id)
-              case _ => IdUtil.getUserAuthorizationId(SnappyParserConsts.LDAPGROUP.lower) +
-                  ':' + IdUtil.getUserAuthorizationId(id)
-            })
-        ). + (commaSep) ~> ((policyTo: Any) => policyTo.asInstanceOf[Seq[String]].map(_.trim))
+        ((CURRENT_USER ~ push(SnappyParserConsts.CURRENT_USER.lower) | groupOrUser) + commaSep) ~>
+        ((policyTo: Any) => policyTo.asInstanceOf[Seq[String]])
     ).? ~> ((toOpt: Any) => toOpt match {
       case Some(x) => x.asInstanceOf[Seq[String]]
       case _ => SnappyParserConsts.CURRENT_USER.lower :: Nil
@@ -403,7 +426,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
     (CREATE ~ POLICY) ~ tableIdentifier ~ ON ~ tableIdentifier ~ policyFor ~
         policyTo ~ USING ~ capture(expression) ~> { (policyName: TableIdentifier,
         tableName: TableIdentifier, policyFor: String,
-        applyTo: Seq[String], filterExp: Expression, filterStr: String) => {
+        applyTo: Seq[String], filterExp: Expression, filterStr: String) =>
       val applyToAll = applyTo.exists(_.equalsIgnoreCase(
         SnappyParserConsts.CURRENT_USER.lower))
       val expandedApplyTo = if (applyToAll) Nil
@@ -416,14 +439,13 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
       }).isDefined
       */
       // use normalized value for string comparison in filters
-      val currentUser = IdUtil.getUserAuthorizationId(this.session.conf.get(
-        com.pivotal.gemfirexd.Attribute.USERNAME_ATTR, Constant.DEFAULT_SCHEMA))
+      val currentUser = IdUtil.getUserAuthorizationId(sqlConf.getConfString(
+        com.pivotal.gemfirexd.Attribute.USERNAME_ATTR, Constant.DEFAULT_DATABASE))
       val filter = PolicyProperties.createFilterPlan(filterExp, tableName,
         currentUser, expandedApplyTo)
 
       CreatePolicyCommand(policyName, tableName, policyFor, applyTo, expandedApplyTo,
         currentUser, filterStr, filter)
-    }
     }
   }
 
@@ -501,6 +523,21 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   protected final def tableEnd: Rule2[StringBuilder, TableEnd] = rule {
     (capture(beforeDDLEnd.*) ~> ((s: String) =>
       new StringBuilder().append(s))) ~ tableEnd1
+  }
+
+  protected def interpretCode: Rule1[LogicalPlan] = rule {
+    EXEC ~ SCALA ~ (OPTIONS ~ options).? ~ capture(ANY.*) ~> ((opts: Any, code: String) =>
+      opts.asInstanceOf[Option[Map[String, String]]] match {
+        case None => InterpretCodeCommand(code, session)
+        case Some(m) => InterpretCodeCommand(code, session, m)
+      })
+  }
+
+  protected def grantRevokeInterpreter: Rule1[LogicalPlan] = rule {
+    GRANT ~ PRIVILEGE ~ EXEC ~ SCALA ~ TO ~ (groupOrUser + commaSep) ~> ((users: Seq[String]) =>
+      GrantRevokeInterpreterCommand(isGrant = true, users)) |
+    REVOKE ~ PRIVILEGE ~ EXEC ~ SCALA ~ FROM ~ (groupOrUser + commaSep) ~> ((users: Seq[String]) =>
+      GrantRevokeInterpreterCommand(isGrant = false, users))
   }
 
   protected def createIndex: Rule1[LogicalPlan] = rule {
@@ -595,20 +632,27 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
         plan: LogicalPlan, queryStr: String) => AlterViewAsCommand(name, queryStr, plan))
   }
 
-  protected def createSchema: Rule1[LogicalPlan] = rule {
-    CREATE ~ SCHEMA ~ ifNotExists ~ identifier ~ (
-        AUTHORIZATION ~ (
-            LDAPGROUP ~ ':' ~ ws ~ identifier ~> ((group: String) => group -> true) |
-            identifier ~> ((id: String) => id -> false)
-        )
-    ).? ~> ((notExists: Boolean, schemaName: String, authId: Any) =>
-      CreateSchemaCommand(notExists, schemaName, authId.asInstanceOf[Option[(String, Boolean)]]))
+  protected def createDatabase: Rule1[LogicalPlan] = rule {
+    CREATE ~ DATABASE ~ ifNotExists ~ identifier ~ (COMMENT ~ stringLiteral).? ~
+        locationSpec.? ~ (WITH ~ DBPROPERTIES ~ options).? ~ (AUTHORIZATION ~ groupOrUser).? ~> {
+      (notExists: Boolean, schemaName: String, c: Any, loc: Any, opts: Any, authId: Any) =>
+        var props = opts.asInstanceOf[Option[Map[String, String]]] match {
+          case None => Map.empty[String, String]
+          case Some(m) => m
+        }
+        authId.asInstanceOf[Option[String]] match {
+          case Some(id) => props += Consts.AUTHORIZATION.lower -> id
+          case _ =>
+        }
+        CreateDatabaseCommand(schemaName, notExists, loc.asInstanceOf[Option[String]],
+          c.asInstanceOf[Option[String]], props)
+    }
   }
 
-  protected def dropSchema: Rule1[LogicalPlan] = rule {
-    DROP ~ SCHEMA ~ ifExists ~ identifier ~ (RESTRICT ~ push(false) | CASCADE ~ push(true)).? ~>
-        ((exists: Boolean, schemaName: String, cascade: Any) => DropSchemaCommand(
-          schemaName, exists, cascade.asInstanceOf[Option[Boolean]].contains(true)))
+  protected def dropDatabase: Rule1[LogicalPlan] = rule {
+    DROP ~ DATABASE ~ ifExists ~ identifier ~ (RESTRICT ~ push(false) | CASCADE ~ push(true)).? ~>
+        ((exists: Boolean, databaseName: String, cascade: Any) => DropDatabaseCommand(
+          databaseName, exists, cascade.asInstanceOf[Option[Boolean]].contains(true)))
   }
 
   protected def truncateTable: Rule1[LogicalPlan] = rule {
@@ -707,7 +751,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
         val specifiedSchema = schema.asInstanceOf[Option[Seq[StructField]]]
             .map(fields => StructType(fields))
         // check that the provider is a stream relation
-        val clazz = internals.lookupDataSource(provider, session.sessionState.conf)
+        val clazz = internals.lookupDataSource(provider, sqlConf)
         if (!classOf[StreamPlanProvider].isAssignableFrom(clazz)) {
           throw Utils.analysisException(s"CREATE STREAM provider $provider" +
               " does not implement StreamPlanProvider")
@@ -802,12 +846,40 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
    * }}}
    */
   protected def passThrough: Rule1[LogicalPlan] = rule {
-    (GRANT | REVOKE | (CREATE | DROP) ~ (DISKSTORE | TRIGGER) |
-        (ch('{').? ~ ws ~ (CALL | EXECUTE))) ~ ANY.* ~>
+    (passThroughStatementInit | passThroughStatement(includeIndex = false)) ~>
         /* dummy table because we will pass sql to gemfire layer so we only need to have sql */
         (() => DMLExternalTable(LogicalRelation(new execution.row.DefaultSource().createRelation(
           session.sqlContext, Map(SnappyExternalCatalog.DBTABLE_PROPERTY -> JdbcExtendedUtils
               .DUMMY_TABLE_QUALIFIED_NAME))), input.sliceString(0, input.length)))
+  }
+
+  /**
+   * SQL statements that are passed through to the store and need to be executed
+   * at the very start for store `initialization`.
+   */
+  protected def passThroughStatementInit: Rule0 = rule {
+    ((CREATE | DROP) ~ DISKSTORE | (('{' ~ ws).? ~ (CALL | EXECUTE))) ~ ANY.*
+  }
+
+  protected def passThroughStatement(includeIndex: Boolean): Rule0 = rule {
+    (GRANT | REVOKE | (CREATE | DROP) ~ (TRIGGER | test(includeIndex) ~
+        (GLOBAL ~ HASH | UNIQUE).? ~ INDEX)) ~ ANY.*
+  }
+
+  final def extTableIdentifier: Rule1[TableIdentifier] = rule {
+    tableIdentifier ~> { (td: TableIdentifier) =>
+      val tmd = session.sessionCatalog.getTableMetadata(td)
+      if (tmd.tableType == CatalogTableType.EXTERNAL) push(td) else MISMATCH
+    }
+  }
+
+  protected def grantRevokeExternal: Rule1[LogicalPlan] = rule {
+    GRANT ~ ALL ~ ON ~ extTableIdentifier ~ TO ~ (groupOrUser + commaSep) ~>
+        ((td: TableIdentifier, users: Seq[String]) =>
+          GrantRevokeOnExternalTable(isGrant = true, td, users)) |
+    REVOKE ~ ALL ~ ON ~ extTableIdentifier ~ FROM ~ (groupOrUser + commaSep) ~>
+        ((td: TableIdentifier, users: Seq[String]) =>
+          GrantRevokeOnExternalTable(isGrant = false, td, users))
   }
 
   /**
@@ -833,7 +905,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
           ((alias: TableIdentifier, commaSepPaths: String) => DeployJarCommand(
         alias.identifier, commaSepPaths, restart = false))) |
     UNDEPLOY ~ packageIdentifier ~> ((alias: TableIdentifier) =>
-      UnDeployCommand(alias.identifier)) |
+      UndeployCommand(alias.identifier)) |
     LIST ~ (
       PACKAGES ~> (() => ListPackageJarsCommand(true)) |
       JARS ~> (() => ListPackageJarsCommand(false))
@@ -860,7 +932,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
             functionIdentifier ~> ((extended: Any, name: FunctionIdentifier) =>
           DescribeFunctionCommand(name,
             extended.asInstanceOf[Option[Boolean]].isDefined)) |
-        (SCHEMA | DATABASE) ~ (EXTENDED ~ push(true)).? ~ identifier ~>
+        DATABASE ~ (EXTENDED ~ push(true)).? ~ identifier ~>
             ((extended: Any, name: String) =>
               DescribeDatabaseCommand(name, extended.asInstanceOf[Option[Boolean]].isDefined)) |
         (EXTENDED ~ push(true) | FORMATTED ~ push(false)).? ~ tableIdentifier ~ partitionSpec ~>
@@ -898,25 +970,24 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
     CLEAR ~ CACHE ~> (() => internals.newClearCacheCommand())
   }
 
+  protected def useDatabase: Rule1[LogicalPlan] = rule {
+    SET ~ CURRENT.? ~ DATABASE ~ ('=' ~ ws).? ~ identifier ~> SetDatabaseCommand |
+    USE ~ identifier ~> SetDatabaseCommand
+  }
+
   protected def set: Rule1[LogicalPlan] = rule {
-    SET ~ (
-        CURRENT.? ~ (SCHEMA | DATABASE) ~ '='.? ~ ws ~ identifier ~>
-            ((schemaName: String) => SetSchemaCommand(schemaName)) |
-        // noinspection ScalaUnnecessaryParentheses
-        capture(ANY.*) ~> { (rest: String) =>
-          val separatorIndex = rest.indexOf('=')
-          if (separatorIndex >= 0) {
-            val key = rest.substring(0, separatorIndex).trim
-            val value = rest.substring(separatorIndex + 1).trim
-            new SetSnappyCommand(Some(key -> Option(value)))
-          } else if (rest.nonEmpty) {
-            new SetSnappyCommand(Some(rest.trim -> None))
-          } else {
-            new SetSnappyCommand(None)
-          }
-        }
-    ) |
-    USE ~ identifier ~> SetSchemaCommand
+    SET ~ capture(ANY.*) ~> { (rest: String) =>
+      val separatorIndex = rest.indexOf('=')
+      if (separatorIndex >= 0) {
+        val key = rest.substring(0, separatorIndex).trim
+        val value = rest.substring(separatorIndex + 1).trim
+        new SetSnappyCommand(Some(key -> Option(value)))
+      } else if (rest.nonEmpty) {
+        new SetSnappyCommand(Some(rest.trim -> None))
+      } else {
+        new SetSnappyCommand(None)
+      }
+    }
   }
 
   protected def reset: Rule1[LogicalPlan] = rule {
@@ -1009,7 +1080,7 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
   }
 
   protected final def option: Rule1[(String, String)] = rule {
-    optionKey ~ ('=' ~ '='.? ~ ws).? ~ (stringLiteral | numericLiteral | booleanLiteral) ~ ws ~>
+    optionKey ~ ('=' ~ '='.? ~ ws).? ~ (stringLiteral | numericLiteral | booleanLiteral) ~>
         ((k: String, v: Any) => k -> v.toString)
   }
 
@@ -1018,12 +1089,18 @@ abstract class SnappyDDLParser(session: SnappySession) extends SnappyBaseParser 
         ((pairs: Any) => pairs.asInstanceOf[Seq[(String, String)]].toMap)
   }
 
+  protected final def allowDDL: Rule0 = rule {
+    test(!Misc.getGemFireCache.isSnappyRecoveryMode ||
+        SnappyContext.getClusterMode(sparkContext).isInstanceOf[ThinClientConnectorMode])
+  }
+
   protected def ddl: Rule1[LogicalPlan] = rule {
-    createTableLike | createHiveTable | createTable | describe | refreshTable | dropTable |
-    truncateTable | createView | createTempViewUsing | dropView | alterView | createSchema |
-    dropSchema | alterTableToggleRowLevelSecurity | createPolicy | dropPolicy |
+    describe | allowDDL ~ (createTableLike | createHiveTable | createTable | refreshTable |
+    dropTable | truncateTable | createView | createTempViewUsing | dropView | alterView |
+    createDatabase | dropDatabase | alterTableToggleRowLevelSecurity | createPolicy | dropPolicy |
     alterTableProps | alterTableOrView | alterTable | createStream | streamContext |
-    createIndex | dropIndex | createFunction | dropFunction | passThrough
+    createIndex | dropIndex | createFunction | dropFunction | grantRevokeInterpreter |
+    grantRevokeExternal | passThrough | interpretCode)
   }
 
   protected def partitionSpec: Rule1[Map[String, Option[String]]]

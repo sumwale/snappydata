@@ -17,6 +17,7 @@
 package org.apache.spark.sql.execution.row
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils.CaseInsensitiveMutableHashMap
 import org.apache.spark.sql.execution.datasources.jdbc.JDBCPartition
@@ -41,6 +42,9 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
     }
   }
 
+  private def caseInsensitive(opts: Map[String, String]): CaseInsensitiveMutableHashMap[String] =
+    new CaseInsensitiveMutableHashMap(opts)
+
   override def createRelation(sqlContext: SQLContext,
       options: Map[String, String]): RowFormatRelation = {
     val schemaString = getSchemaString(options) match {
@@ -49,7 +53,7 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
     }
     // table has already been checked for existence by callers if required so here mode is Ignore
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
-    createRelation(session, SaveMode.Ignore, options, schemaString)
+    createRelation(session, SaveMode.Ignore, caseInsensitive(options), schemaString)
   }
 
   override def createRelation(sqlContext: SQLContext, options: Map[String, String],
@@ -57,14 +61,17 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
     val schemaString = getSchemaString(options, schema, session.sparkContext)
     // table has already been checked for existence by callers if required so here mode is Ignore
-    createRelation(session, SaveMode.Ignore, options, schemaString)
+    createRelation(session, SaveMode.Ignore, caseInsensitive(options), schemaString)
   }
 
   override def createRelation(sqlContext: SQLContext, mode: SaveMode,
       options: Map[String, String], data: DataFrame): RowFormatRelation = {
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
-    val schemaString = getSchemaString(options, data.schema, sqlContext.sparkContext)
-    val relation = createRelation(session, mode, options, schemaString)
+    val caseInsensitiveOptions = caseInsensitive(options)
+    val schemaString = getSchemaString(options,
+      Utils.modifySchemaIfNeeded(caseInsensitiveOptions, session, data.schema),
+      sqlContext.sparkContext)
+    val relation = createRelation(session, mode, caseInsensitiveOptions, schemaString)
     var success = false
     try {
       // Need to create a catalog entry before insert since it will read the catalog
@@ -89,11 +96,10 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
   }
 
   private[sql] def createRelation(session: SnappySession, mode: SaveMode,
-      options: Map[String, String], schemaString: String): RowFormatRelation = {
-
-    val parameters = new CaseInsensitiveMutableHashMap(options)
+      parameters: CaseInsensitiveMutableHashMap[String],
+      schemaString: String): RowFormatRelation = {
     val fullTableName = ExternalStoreUtils.removeInternalPropsAndGetTable(parameters)
-    ExternalStoreUtils.getAndSetTotalPartitions(session, parameters,
+    ExternalStoreUtils.getAndSetTotalPartitions(parameters,
       forManagedTable = true, forColumnTable = false)
     StoreUtils.getAndSetPartitioningAndKeyColumns(session, schema = null, parameters)
     val tableOptions = new CaseInsensitiveMutableHashMap[String](parameters.toMap)

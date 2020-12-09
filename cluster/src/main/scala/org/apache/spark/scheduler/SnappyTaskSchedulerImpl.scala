@@ -16,13 +16,22 @@
  */
 package org.apache.spark.scheduler
 
+import java.util.Properties
+
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.SnappyContext
+import org.apache.spark.sql.collection.ToolsCallbackInit
 
 private[spark] class SnappyTaskSchedulerImpl(sc: SparkContext) extends TaskSchedulerImpl(sc) {
 
   override def postStartHook(): Unit = {
     SnappyContext.initGlobalSparkContext(sc)
     super.postStartHook()
+  }
+
+  override def getInterpreterClassLoader(taskProps: Properties): ClassLoader = {
+    if (ToolsCallbackInit.toolsCallback != null) {
+      ToolsCallbackInit.toolsCallback.getInterpreterClassLoader(taskProps)
+    } else null
   }
 }

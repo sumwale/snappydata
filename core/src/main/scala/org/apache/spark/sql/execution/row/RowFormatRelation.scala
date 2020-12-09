@@ -37,7 +37,7 @@ import org.apache.spark.sql.internal.ColumnTableBulkOps
 import org.apache.spark.sql.row.JDBCMutableRelation
 import org.apache.spark.sql.sources.JdbcExtendedUtils.quotedName
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.store.CodeGeneration
+import org.apache.spark.sql.store.{CodeGeneration, StoreUtils}
 
 /**
  * A LogicalPlan implementation for an Snappy row table whose contents
@@ -62,7 +62,7 @@ class RowFormatRelation(
     with RowPutRelation {
 
   override def toString: String = s"RowFormatRelation[${Utils.toLowerCase(table)}]"
-
+  def getColocatedTable: Option[String] = origOptions.get(StoreUtils.COLOCATE_WITH)
   override val connectionType: ConnectionType.Value =
     ExternalStoreUtils.getConnectionType(dialect)
 
@@ -81,7 +81,7 @@ class RowFormatRelation(
 
   override def sizeInBytes: Long = schemaName match {
     // fill in some small size for system tables/VTIs
-    case SnappyExternalCatalog.SYS_SCHEMA =>
+    case SnappyExternalCatalog.SYS_DATABASE =>
       math.max(102400, sqlContext.conf.autoBroadcastJoinThreshold / 10)
     case _ => super.sizeInBytes
   }
@@ -99,7 +99,7 @@ class RowFormatRelation(
     }
 
     // all columns of primary key have to be present in filter to be usable
-    if (schemaName == SnappyExternalCatalog.SYS_SCHEMA) Nil
+    if (schemaName == SnappyExternalCatalog.SYS_DATABASE) Nil
     else {
       val equalToColumns = getEqualToColumns(filters)
       val pkCols = relationInfo.pkCols.toSeq
@@ -121,7 +121,7 @@ class RowFormatRelation(
     val rdd = connectionType match {
       case ConnectionType.Embedded =>
         val region = schemaName match {
-          case SnappyExternalCatalog.SYS_SCHEMA => None
+          case SnappyExternalCatalog.SYS_DATABASE => None
           case _ => Some(Misc.getRegionForTable(resolvedName, true).asInstanceOf[LocalRegion])
         }
         val pushProjections = !region.isInstanceOf[CacheDistributionAdvisee]

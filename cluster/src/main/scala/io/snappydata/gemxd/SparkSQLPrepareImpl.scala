@@ -24,6 +24,7 @@ import com.gemstone.gemfire.DataSerializer
 import com.gemstone.gemfire.internal.shared.Version
 import com.pivotal.gemfirexd.Attribute
 import com.pivotal.gemfirexd.internal.engine.Misc
+import com.pivotal.gemfirexd.internal.engine.distributed.execution.LeadNodeExecutionObject
 import com.pivotal.gemfirexd.internal.engine.distributed.message.LeadNodeExecutorMsg
 import com.pivotal.gemfirexd.internal.engine.distributed.{GfxdHeapDataOutputStream, SnappyResultHolder}
 import com.pivotal.gemfirexd.internal.impl.jdbc.Util
@@ -82,7 +83,7 @@ class SparkSQLPrepareImpl(val sql: String,
     columnDataTypes.map(d => SparkSQLExecuteImpl.getSQLType(d, complexTypeAsJson))
 
   override def packRows(msg: LeadNodeExecutorMsg,
-      srh: SnappyResultHolder): Unit = {
+      srh: SnappyResultHolder, execObject: LeadNodeExecutionObject): Unit = {
     hdos.clearForReuse()
     SparkSQLExecuteImpl.writeMetaData(srh, hdos, tableNames, nullability, columnNames,
       getColumnTypes, columnDataTypes, session.getWarnings)

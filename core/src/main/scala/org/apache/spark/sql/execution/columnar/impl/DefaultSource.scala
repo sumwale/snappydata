@@ -52,6 +52,9 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
       parser.parseSQLOnly(s, parser.tableSchemaOpt.run()).map(StructType(_))
   }
 
+  private def caseInsensitive(opts: Map[String, String]): CaseInsensitiveMutableHashMap[String] =
+    new CaseInsensitiveMutableHashMap(opts)
+
   override def createRelation(sqlContext: SQLContext,
       options: Map[String, String]): BaseColumnFormatRelation = {
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
@@ -60,24 +63,25 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
       case Some(s) => s
     }
     // table has already been checked for existence by callers if required so here mode is Ignore
-    createRelation(session, SaveMode.Ignore, options, schema)
+    createRelation(session, SaveMode.Ignore, caseInsensitive(options), schema)
   }
 
   override def createRelation(sqlContext: SQLContext,
       options: Map[String, String], schema: StructType): BaseColumnFormatRelation = {
     // table has already been checked for existence by callers if required so here mode is Ignore
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
-    createRelation(session, SaveMode.Ignore, options, schema)
+    createRelation(session, SaveMode.Ignore, caseInsensitive(options), schema)
   }
 
   override def createRelation(sqlContext: SQLContext, mode: SaveMode,
       options: Map[String, String], data: DataFrame): BaseColumnFormatRelation = {
     val session = sqlContext.sparkSession.asInstanceOf[SnappySession]
+    val caseInsensitiveOptions = caseInsensitive(options)
     val schema = getSchema(session, options) match {
-      case None => data.schema
+      case None => Utils.modifySchemaIfNeeded(caseInsensitiveOptions, session, data.schema)
       case Some(s) => s
     }
-    val relation = createRelation(session, mode, options, schema)
+    val relation = createRelation(session, mode, caseInsensitiveOptions, schema)
     var success = false
     try {
       // Need to create a catalog entry before insert since it will read the catalog
@@ -101,9 +105,8 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
   }
 
   private[sql] def createRelation(session: SnappySession, mode: SaveMode,
-      options: Map[String, String], specifiedSchema: StructType): BaseColumnFormatRelation = {
-
-    val parameters = new CaseInsensitiveMutableHashMap(options)
+      parameters: CaseInsensitiveMutableHashMap[String],
+      specifiedSchema: StructType): BaseColumnFormatRelation = {
     val fullTableName = ExternalStoreUtils.removeInternalPropsAndGetTable(parameters)
 
     // don't allow commas in column names since it is used as separator in multiple places
@@ -113,7 +116,7 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
         s"Column '${f.name}' in '$fullTableName' cannot contain comma in its name")
     }
 
-    val partitions = ExternalStoreUtils.getAndSetTotalPartitions(session, parameters,
+    val partitions = ExternalStoreUtils.getAndSetTotalPartitions(parameters,
       forManagedTable = true)
 
     val parametersForShadowTable = new CaseInsensitiveMutableHashMap(parameters)
@@ -149,11 +152,9 @@ final class DefaultSource extends ExternalSchemaRelationProvider with SchemaRela
       connProperties.dialect)
     val schemaExtension = if (schemaString.length > 0) {
       val temp = schemaString.substring(0, schemaString.length - 1).
-          concat(s", ${StoreUtils.ROWID_COLUMN_DEFINITION}, $primaryKeyClause )")
+          concat(s", ${StoreUtils.ROWID_COLUMN_DEFINITION}, $primaryKeyClause)")
       s"$temp $ddlExtension"
-    } else {
-      s"$schemaString $ddlExtension"
-    }
+    } else ddlExtension
 
     var success = false
     val externalStore = new JDBCSourceAsColumnarStore(connProperties,

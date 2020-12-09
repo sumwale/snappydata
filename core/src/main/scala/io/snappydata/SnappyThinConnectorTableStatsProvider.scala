@@ -66,8 +66,8 @@ object SnappyThinConnectorTableStatsProvider extends TableStatsProviderService {
           _url = url
           initializeConnection(Some(sc))
           // reduce default interval a bit
-          val delay = sc.getConf.getLong(Constant.SPARK_SNAPPY_PREFIX +
-              "calcTableSizeInterval", DEFAULT_CALC_TABLE_SIZE_SERVICE_INTERVAL)
+          val delay = sc.getConf.getLong(CALC_TABLE_SIZE_SERVICE_INTERVAL,
+            DEFAULT_CALC_TABLE_SIZE_SERVICE_INTERVAL)
           doRun = true
           new Timer("SnappyThinConnectorTableStatsProvider", true).schedule(
             new TimerTask {

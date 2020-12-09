@@ -31,6 +31,7 @@ import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
 import org.apache.spark.sql.hive.execution.HiveTableScanExec
+import org.apache.spark.sql.hive.{SnappyHiveExternalCatalog => SnappyCatalog}
 import org.apache.spark.sql.internal.StaticSQLConf.WAREHOUSE_PATH
 import org.apache.spark.sql.{ClusterMode, SnappyContext, ThinClientConnectorMode}
 import org.apache.spark.{Logging, SparkConf, SparkContext}
@@ -61,20 +62,25 @@ object HiveClientUtil extends Logging {
    * the in-built Hive MetaStore.
    */
   def getOrCreateExternalCatalog(sparkContext: SparkContext,
-      conf: SparkConf): SnappyHiveExternalCatalog = synchronized {
+      newConf: () => SparkConf): SnappyCatalog = SnappyCatalog.synchronized {
+    SnappyCatalog.getInstanceIfCurrent match {
+      case Some(catalog) => return catalog
+      case _ =>
+    }
     val (dbURL, dbDriver) = resolveMetaStoreDBProps(SnappyContext.getClusterMode(sparkContext))
     val metadataConf = new SnappyHiveConf
     // make a copy of SparkConf since it is to be updated later
-    val sparkConf = conf.clone()
+    val sparkConf = newConf()
     var user = sparkConf.getOption(SPARK_STORE_PREFIX + USERNAME_ATTR)
     var password = sparkConf.getOption(SPARK_STORE_PREFIX + PASSWORD_ATTR)
     if (user.isEmpty) {
       user = sparkConf.getOption(STORE_PROPERTY_PREFIX + USERNAME_ATTR)
       password = sparkConf.getOption(STORE_PROPERTY_PREFIX + PASSWORD_ATTR)
     }
+    val memStore = Misc.getMemStoreBooting
     // check store boot properties
     if (user.isEmpty) {
-      val bootProperties = Misc.getMemStoreBooting.getBootProperties
+      val bootProperties = memStore.getBootProperties
       bootProperties.get(USERNAME_ATTR).asInstanceOf[String] match {
         case null =>
         case u =>
@@ -91,9 +97,8 @@ object HiveClientUtil extends Logging {
         SystemProperties.SNAPPY_HIVE_METASTORE)
       dbURL
     }
-    if (SnappyHiveExternalCatalog.getInstance eq null) {
-      logInfo(s"Using dbURL = $logURL for Hive metastore initialization")
-    }
+    logInfo(s"Using dbURL = $logURL for Hive metastore initialization")
+
     metadataConf.setVar(ConfVars.METASTORECONNECTURLKEY, secureDbURL)
     metadataConf.setVar(ConfVars.METASTORE_CONNECTION_DRIVER, dbDriver)
 
@@ -120,7 +125,18 @@ object HiveClientUtil extends Logging {
     val oldSkipCatalogCalls = skipFlags.skipHiveCatalogCalls
     skipFlags.skipHiveCatalogCalls = true
     try {
-      SnappyHiveExternalCatalog.getInstance(sparkConf, metadataConf)
+      // In case of data extractor - recovery mode, derby should be used as hive metastore
+      if (memStore.getGemFireCache.isSnappyRecoveryMode &&
+          !(memStore.getMyVMKind.isLocator || memStore.getMyVMKind.isStore)) {
+        logInfo("Using derby as hive metastore.")
+        logDebug("Spark conf being used for SnappyHiveExternalCatalog: " + sparkConf.toDebugString)
+        val recoveryModeHiveConf = new SnappyHiveConf
+        recoveryModeHiveConf.setVar(ConfVars.METASTORECONNECTURLKEY,
+          "jdbc:derby:memory:metastore_db;create=true")
+        SnappyCatalog.newInstance(sparkConf, recoveryModeHiveConf)
+      } else {
+        SnappyCatalog.newInstance(sparkConf, metadataConf)
+      }
     } finally {
       skipFlags.skipHiveCatalogCalls = oldSkipCatalogCalls
       // clear the system properties set for hive

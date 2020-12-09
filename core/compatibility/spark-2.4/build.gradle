@@ -27,7 +27,7 @@ sourceSets.main.java.srcDirs = []
 
 // keeping this as sparkConnectorVersion helps use the same for multiple Spark versions
 // for using the same gradle build across 2.4.x versions
-String sparkCompatVersion = (sparkConnectorVersion ==~ /2.4.*/) ? sparkConnectorVersion : '2.4.6'
+String sparkCompatVersion = (sparkConnectorVersion ==~ /2.4.*/) ? sparkConnectorVersion : '2.4.7'
 
 dependencies {
   compileOnly 'org.scala-lang:scala-library:' + scalaVersion

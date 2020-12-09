@@ -29,6 +29,7 @@ import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 import com.gemstone.gemfire.cache.IsolationLevel
 import com.gemstone.gemfire.internal.cache._
 import com.gemstone.gemfire.internal.shared.ClientSharedData
+import com.pivotal.gemfirexd.internal.engine.Misc
 import com.pivotal.gemfirexd.internal.engine.ddl.catalog.GfxdSystemProcedures
 import com.pivotal.gemfirexd.internal.engine.distributed.utils.GemFireXDUtils
 import com.pivotal.gemfirexd.internal.engine.store.{AbstractCompactExecRow, GemFireContainer, RawStoreResultSet, RegionEntryUtils}
@@ -43,7 +44,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.collection.{MultiBucketExecutorPartition, Utils}
 import org.apache.spark.sql.execution.columnar.{ExternalStoreUtils, ResultSetIterator}
 import org.apache.spark.sql.execution.sources.StoreDataSourceStrategy.translateToFilter
-import org.apache.spark.sql.execution.{RDDKryo, SecurityUtils}
+import org.apache.spark.sql.execution.{BucketsBasedIterator, RDDKryo, SecurityUtils}
 import org.apache.spark.sql.sources.JdbcExtendedUtils.quotedName
 import org.apache.spark.sql.sources._
 import org.apache.spark.{Partition, TaskContext, TaskContextImpl, TaskKilledException}
@@ -268,9 +269,14 @@ class RowFormatScanRDD(@transient val session: SnappySession,
    */
   override def compute(thePart: Partition, context: TaskContext): Iterator[Any] = {
 
+    if (Misc.getMemStoreBootingNoThrow != null && useResultSet) {
+      SecurityUtils.authorizeTableOperation(tableName, projection,
+        Authorizer.SELECT_PRIV, Authorizer.SQL_SELECT_OP, connProperties)
+    }
     if (pushProjections) {
       val (conn, stmt, rs) = computeResultSet(thePart, context)
-      val itr = new ResultSetTraversal(conn, stmt, rs, context)
+      val itr = new ResultSetTraversal(stmt, rs, context,
+        java.util.Collections.emptySet[Integer]())
       if (commitTx) {
         commitTxBeforeTaskCompletion(Option(conn), context)
       }
@@ -278,10 +284,6 @@ class RowFormatScanRDD(@transient val session: SnappySession,
     } else {
       // explicitly check authorization for the case of column table scan
       // !pushProjections && useResultSet means a column table
-      if (useResultSet) {
-        SecurityUtils.authorizeTableOperation(tableName, projection,
-          Authorizer.SELECT_PRIV, Authorizer.SQL_SELECT_OP, connProperties)
-      }
       val txManagerImpl = GemFireCacheImpl.getExisting.getCacheTransactionManager
       var tx = txManagerImpl.getTXState
       val startTX = tx eq null
@@ -299,23 +301,22 @@ class RowFormatScanRDD(@transient val session: SnappySession,
           case _ => java.util.Collections.singleton(Int.box(thePart.index))
         }
 
-        val txId = if (tx ne null) tx.getTransactionId else null
-        val itr = new CompactExecRowIteratorOnScan(container, bucketIds, txId, context)
+        val itr = new CompactExecRowIteratorOnScan(container, bucketIds, context)
         if (useResultSet) {
           // row buffer of column table: wrap a result set around the scan
           val dataItr = itr.map(r =>
             if (r.hasByteArrays) r.getRowByteArrays(null) else r.getRowBytes(null): AnyRef).asJava
           val rs = new RawStoreResultSet(dataItr, container, container.getCurrentRowFormatter)
-          new ResultSetTraversal(conn = null, stmt = null, rs, context)
+          new ResultSetTraversal(stmt = null, rs, context, bucketIds)
         } else itr
       } else {
-        val (conn, stmt, rs) = computeResultSet(thePart, context)
+        val (_, stmt, rs) = computeResultSet(thePart, context)
         val ers = rs match {
           case e: EmbedResultSet => e
           case p: ProxyResultSet =>
             resultSetField.get(p).asInstanceOf[EmbedResultSet]
         }
-        new CompactExecRowIteratorOnRS(conn, stmt, ers, context)
+        new CompactExecRowIteratorOnRS(stmt, ers, context)
       }
       // add the listener after the close listener added by iterator
       // so its invoked just before it
@@ -442,20 +443,22 @@ class RowFormatScanRDD(@transient val session: SnappySession,
  * expected to explicitly invoke ResultSet.next()/get*.
  * This is primarily intended to be used for cleanup.
  */
-final class ResultSetTraversal(conn: Connection,
-    stmt: Statement, val rs: ResultSet, context: TaskContext)
-    extends ResultSetIterator[Void](conn, stmt, rs, context) {
+final class ResultSetTraversal(stmt: Statement, val rs: ResultSet,
+    context: TaskContext, bucketSet: java.util.Set[Integer])
+    extends ResultSetIterator[Void](stmt, rs, context) {
 
   lazy val defaultCal: GregorianCalendar =
     ClientSharedData.getDefaultCleanCalendar
 
   override protected def getCurrentValue: Void = null
+
+  def getBucketSet: java.util.Set[Integer] = this.bucketSet
 }
 
-final class CompactExecRowIteratorOnRS(conn: Connection,
-    stmt: Statement, ers: EmbedResultSet, context: TaskContext)
-    extends ResultSetIterator[AbstractCompactExecRow](conn, stmt,
-      ers, context) {
+final class CompactExecRowIteratorOnRS(stmt: Statement, ers: EmbedResultSet, context: TaskContext)
+    extends ResultSetIterator[AbstractCompactExecRow](stmt, ers, context) {
+
+  def getBucketSet: java.util.Set[Integer] = java.util.Collections.emptySet[Integer]()
 
   override protected def getCurrentValue: AbstractCompactExecRow = {
     ers.currentRow.asInstanceOf[AbstractCompactExecRow]
@@ -463,7 +466,10 @@ final class CompactExecRowIteratorOnRS(conn: Connection,
 }
 
 abstract class PRValuesIterator[T](container: GemFireContainer, region: LocalRegion,
-    bucketIds: java.util.Set[Integer], context: TaskContext) extends Iterator[T] {
+    bucketIds: java.util.Set[Integer], context: TaskContext)
+    extends Iterator[T] with BucketsBasedIterator {
+
+  def getBucketSet: java.util.Set[Integer] = this.bucketIds
 
   protected type PRIterator = PartitionedRegion#PRLocalScanIterator
 
@@ -515,7 +521,7 @@ abstract class PRValuesIterator[T](container: GemFireContainer, region: LocalReg
 }
 
 final class CompactExecRowIteratorOnScan(container: GemFireContainer,
-    bucketIds: java.util.Set[Integer], txId: TXId, context: TaskContext)
+    bucketIds: java.util.Set[Integer], context: TaskContext)
     extends PRValuesIterator[AbstractCompactExecRow](container,
       region = null, bucketIds, context) {
 

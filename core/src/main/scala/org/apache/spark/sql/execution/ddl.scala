@@ -19,10 +19,6 @@ package org.apache.spark.sql.execution
 
 import java.io.File
 import java.nio.file.{Files, Paths}
-import java.util.Map.Entry
-import java.util.function.Consumer
-
-import scala.collection.mutable.ArrayBuffer
 
 import com.gemstone.gemfire.SystemFailure
 import com.pivotal.gemfirexd.internal.engine.Misc
@@ -30,7 +26,7 @@ import com.pivotal.gemfirexd.internal.engine.store.GemFireStore
 import com.pivotal.gemfirexd.internal.iapi.reference.{Property => GemXDProperty}
 import com.pivotal.gemfirexd.internal.impl.jdbc.Util
 import com.pivotal.gemfirexd.internal.shared.common.reference.SQLState
-import io.snappydata.Property
+import io.snappydata.{Constant, Property}
 import io.snappydata.util.ServiceUtils
 
 import org.apache.spark.SparkContext
@@ -45,11 +41,85 @@ import org.apache.spark.sql.collection.{ToolsCallbackInit, Utils}
 import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.command.{DropTableCommand, RunnableCommand, SetCommand, ShowTablesCommand}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
-import org.apache.spark.sql.internal.{BypassRowLevelSecurity, ContextJarUtils, StaticSQLConf}
+import org.apache.spark.sql.internal.{BypassRowLevelSecurity, ContextJarUtils, SQLConf, StaticSQLConf}
 import org.apache.spark.sql.sources.DestroyRelation
 import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.{Duration, SnappyStreamingContext}
+
+/**
+ * Allow execution of adhoc scala code on the Lead node.
+ * Creates a new Scala interpreter for a Snappy Session. But, cached for the life of the
+ * session. Subsequent invocations of the 'interpret' command will resuse the cached
+ * interpreter. Allowing any variables (e.g. dataframe) to be preserved across invocations.
+ * State will not be preserved during Lead node failover.
+ * <p> Application is injected (1) The SnappySession in variable called 'session' and
+ * (2) The Options in a variable called 'intp_options'.
+ * <p> To return values set a variable called 'intp_return' - a Seq[Row].
+ */
+case class InterpretCodeCommand(
+    code: String,
+    snappySession: SnappySession,
+    options: Map[String, String] = Map.empty) extends RunnableCommand {
+
+  lazy val df: Dataset[Row] = {
+    val tcb = ToolsCallbackInit.toolsCallback
+    if (tcb != null) {
+      // supported in embedded mode only
+      tcb.getScalaCodeDF(code, snappySession, options)
+    } else {
+      null
+    }
+  }
+
+  // This is handled directly by Remote Interpreter code
+  override def run(sparkSession: SparkSession): Seq[Row] = df.collect()
+
+  override def output: Seq[Attribute] = df.schema.fields.map(
+    x => AttributeReference(x.name, x.dataType, x.nullable)())
+}
+
+case class GrantRevokeInterpreterCommand(
+    isGrant: Boolean, users: Seq[String]) extends RunnableCommand {
+
+  // This is handled directly by Remote Interpreter code
+  override def run(sparkSession: SparkSession): Seq[Row] = {
+    val tcb = ToolsCallbackInit.toolsCallback
+    if (tcb eq null) {
+      throw new AnalysisException("Granting/Revoking" +
+          " of INTERPRETER not supported from smart connector mode")
+    }
+    val session = sparkSession.asInstanceOf[SnappySession]
+    val user = session.conf.get(com.pivotal.gemfirexd.Attribute.USERNAME_ATTR)
+    tcb.updateInterpreterGrantRevoke(user, isGrant, users)
+    Nil
+  }
+}
+
+case class GrantRevokeOnExternalTable(
+    isGrant: Boolean, table: TableIdentifier, users: Seq[String]) extends RunnableCommand {
+
+  // This is handled directly by Remote Interpreter code
+  override def run(sparkSession: SparkSession): Seq[Row] = {
+    val tcb = ToolsCallbackInit.toolsCallback
+    if (tcb == null) {
+      throw new AnalysisException("Granting/Revoking" +
+          " on external table not supported from smart connector mode")
+    }
+    val session = sparkSession.asInstanceOf[SnappySession]
+    val ct = session.sessionCatalog.getTableMetadata(table)
+    val user = session.conf.get(com.pivotal.gemfirexd.Attribute.USERNAME_ATTR)
+    tcb.updateGrantRevokeOnExternalTable(user, isGrant, table, users, ct)
+    Nil
+  }
+}
+
+object GrantRevokeOnExternalTable {
+
+  def getMetaRegionKey(fqtn: String): String = {
+    Constant.EXTERNAL_TABLE_REGION_KEY_PREFIX + fqtn
+  }
+}
 
 case class CreateTableUsingCommand(
     tableIdent: TableIdentifier,
@@ -96,27 +166,6 @@ case class DropTableOrViewCommand(
     }
 
     DropTableCommand(tableIdent, ifExists, isView, purge).run(sparkSession)
-  }
-}
-
-case class CreateSchemaCommand(ifNotExists: Boolean, schemaName: String,
-    authId: Option[(String, Boolean)]) extends RunnableCommand {
-
-  override def run(sparkSession: SparkSession): Seq[Row] = {
-    val session = sparkSession.asInstanceOf[SnappySession]
-    val catalog = session.sessionCatalog
-    val schema = catalog.formatDatabaseName(schemaName)
-    catalog.createSchema(schema, ifNotExists, authId)
-    Nil
-  }
-}
-
-case class DropSchemaCommand(schemaName: String, ignoreIfNotExists: Boolean,
-    cascade: Boolean) extends RunnableCommand {
-  override def run(sparkSession: SparkSession): Seq[Row] = {
-    val session = sparkSession.asInstanceOf[SnappySession]
-    session.sessionCatalog.dropSchema(schemaName, ignoreIfNotExists, cascade)
-    Nil
   }
 }
 
@@ -238,14 +287,6 @@ case class DropIndexCommand(ifExists: Boolean,
   override def run(session: SparkSession): Seq[Row] = {
     val snappySession = session.asInstanceOf[SnappySession]
     snappySession.dropIndex(indexName, ifExists)
-    Nil
-  }
-}
-
-case class SetSchemaCommand(schemaName: String) extends RunnableCommand {
-
-  override def run(sparkSession: SparkSession): Seq[Row] = {
-    sparkSession.asInstanceOf[SnappySession].setCurrentSchema(schemaName)
     Nil
   }
 }
@@ -380,9 +421,8 @@ case class SnappyCacheTableCommand(tableIdent: TableIdentifier, queryString: Str
 class ShowSnappyTablesCommand(schemaOpt: Option[String], tablePattern: Option[String])(
     val hiveCompatible: Boolean) extends ShowTablesCommand(schemaOpt, tablePattern) {
 
-  def this(schemaOpt: Option[String], tablePattern: Option[String], session: SnappySession) {
-    this(schemaOpt, tablePattern)(Property.Compatibility.get(
-      session.sessionState.conf).equalsIgnoreCase("hive"))
+  def this(schemaOpt: Option[String], tablePattern: Option[String], sqlConf: SQLConf) {
+    this(schemaOpt, tablePattern)(Property.hiveCompatible(sqlConf))
   }
 
   override val output: Seq[Attribute] = {
@@ -414,11 +454,10 @@ class ShowSnappyTablesCommand(schemaOpt: Option[String], tablePattern: Option[St
   }
 }
 
-case class ShowViewsCommand(session: SnappySession, schemaOpt: Option[String],
+case class ShowViewsCommand(sqlConf: SQLConf, schemaOpt: Option[String],
     viewPattern: Option[String]) extends RunnableCommand {
 
-  private val hiveCompatible = Property.Compatibility.get(
-    session.sessionState.conf).equalsIgnoreCase("hive")
+  private val hiveCompatible = Property.hiveCompatible(sqlConf)
 
   // The result of SHOW VIEWS has four columns: schemaName, tableName, isTemporary and isGlobal.
   override val output: Seq[Attribute] = {
@@ -571,6 +610,7 @@ case class DeployJarCommand(
 }
 
 case class ListPackageJarsCommand(isJar: Boolean) extends RunnableCommand {
+
   override val output: Seq[Attribute] = {
     AttributeReference("alias", StringType, nullable = false)() ::
         AttributeReference("coordinate", StringType, nullable = false)() ::
@@ -578,26 +618,20 @@ case class ListPackageJarsCommand(isJar: Boolean) extends RunnableCommand {
   }
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
-    val commands = ToolsCallbackInit.toolsCallback.getGlobalCmndsSet
-    val rows = new ArrayBuffer[Row]
-    commands.forEach(new Consumer[Entry[String, String]] {
-      override def accept(t: Entry[String, String]): Unit = {
-        var alias = t.getKey
-        // Skip dropped functions entry
-        if (alias.contains(ContextJarUtils.droppedFunctionsKey)) return
+    ToolsCallbackInit.toolsCallback.getGlobalCommands(skipFunctions = false).collect {
+      // Skip dropped functions entry
+      case (key, value: String) if key != ContextJarUtils.droppedFunctionsKey =>
         // Explicitly mark functions as UDF while listing jars/packages.
-        alias = alias.replace(ContextJarUtils.functionKeyPrefix, "[UDF]")
-        val value = t.getValue
+        val alias = key.replace(ContextJarUtils.functionKeyPrefix, "[UDF]")
         val indexOf = value.indexOf('|')
         if (indexOf > 0) {
           // It is a package
           val pkg = value.substring(0, indexOf)
-          rows += Row(alias, pkg, true)
-        }
-        else {
+          Row(alias, pkg, true)
+        } else {
           // It is a jar
           val jars = value.split(',')
-          val jarfiles = jars.map(f => {
+          val jarFiles = jars.map(f => {
             val lastIndexOf = f.lastIndexOf('/')
             val length = f.length
             if (lastIndexOf > 0) f.substring(lastIndexOf + 1, length)
@@ -605,51 +639,43 @@ case class ListPackageJarsCommand(isJar: Boolean) extends RunnableCommand {
               f
             }
           })
-          rows += Row(alias, jarfiles.mkString(","), false)
+          Row(alias, jarFiles.mkString(","), false)
         }
-      }
-    })
-    rows
+    }.toSeq
   }
 }
 
-case class UnDeployCommand(alias: String) extends RunnableCommand with SparkSupport {
+case class UndeployCommand(alias: String) extends RunnableCommand with SparkSupport {
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
-    var value = ""
-    val sc = sparkSession.sparkContext
-    if (alias != null) {
-      val cmndsSet = ToolsCallbackInit.toolsCallback.getGlobalCmndsSet
-      cmndsSet.forEach(new Consumer[Entry[String, String]] {
-        override def accept(t: Entry[String, String]): Unit = {
-          val alias1 = t.getKey
-          if (alias == alias1) {
-            value = t.getValue
+    if (alias ne null) {
+      val sc = sparkSession.sparkContext
+      ToolsCallbackInit.toolsCallback.getGlobalCommands(skipFunctions = false).get(alias) match {
+        case Some(value: String) =>
+          val indexOf = value.indexOf("|")
+          if (indexOf > 0) {
+            val lastIndexOf = value.lastIndexOf("|")
+            val coordinates = value.substring(0, indexOf)
+            val repos = Option(value.substring(indexOf + 1, lastIndexOf))
+            val jarCache = Option(value.substring(lastIndexOf + 1, value.length))
+            val jars = internals.resolveMavenCoordinates(coordinates,
+              repos, jarCache, Nil)
+            if (jars.nonEmpty) {
+              val pkgs = jars.split(',')
+              RefreshMetadata.executeOnAll(sc, RefreshMetadata.REMOVE_URIS_FROM_CLASSLOADER, pkgs)
+              ToolsCallbackInit.toolsCallback.removeURIs(pkgs)
+            }
+          } else {
+            if (value.nonEmpty) {
+              val jars = value.split(',')
+              RefreshMetadata.executeOnAll(sc, RefreshMetadata.REMOVE_URIS_FROM_CLASSLOADER, jars)
+              ToolsCallbackInit.toolsCallback.removeURIs(jars)
+            }
           }
-        }
-      })
-      val indexOf = value.indexOf("|")
-      val lastIndexOf = value.lastIndexOf("|")
-      if (indexOf > 0) {
-        val coordinates = value.substring(0, indexOf)
-        val repos = Option(value.substring(indexOf + 1, lastIndexOf))
-        val jarCache = Option(value.substring(lastIndexOf + 1, value.length))
-        val jarsstr = internals.resolveMavenCoordinates(coordinates, repos, jarCache, Nil)
-        if (jarsstr.nonEmpty) {
-          val pkgs = jarsstr.split(",")
-          RefreshMetadata.executeOnAll(sc, RefreshMetadata.REMOVE_URIS_FROM_CLASSLOADER, pkgs)
-          ToolsCallbackInit.toolsCallback.removeURIs(pkgs)
-        }
+        case _ =>
       }
-      else {
-        if (value.nonEmpty) {
-          val jars = value.split(',')
-          RefreshMetadata.executeOnAll(sc, RefreshMetadata.REMOVE_URIS_FROM_CLASSLOADER, jars)
-          ToolsCallbackInit.toolsCallback.removeURIs(jars)
-        }
-      }
+      ToolsCallbackInit.toolsCallback.removePackage(alias)
     }
-    ToolsCallbackInit.toolsCallback.removePackage(alias)
     Nil
   }
 }

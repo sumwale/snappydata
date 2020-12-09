@@ -31,8 +31,9 @@ import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.collection.Utils
 import org.apache.spark.sql.collection.Utils.EMPTY_STRING_ARRAY
 import org.apache.spark.sql.execution.columnar.ExternalStoreUtils
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{SparkSession, SparkSupport, TableNotFoundException}
+import org.apache.spark.sql.{SparkSupport, TableNotFoundException}
 import org.apache.spark.{Logging, Partition, SparkEnv}
 
 object ConnectorExternalCatalog extends Logging with SparkSupport {
@@ -76,10 +77,16 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
       if (catalogStats.isSetRowCount) Some(BigInt(catalogStats.getRowCount)) else None, colStats)
   }
 
+  private[snappydata] def convertToCatalogDatabase(
+      catalogSchemaObject: CatalogSchemaObject): CatalogDatabase = {
+    internals.newCatalogDatabase(catalogSchemaObject.getName, catalogSchemaObject.getDescription,
+      catalogSchemaObject.getLocationUri, catalogSchemaObject.getProperties.asScala.toMap)
+  }
+
   private[snappydata] def convertToCatalogTable(request: CatalogMetadataDetails,
-      session: SparkSession): (CatalogTable, Option[RelationInfo]) = {
+      conf: => SQLConf): (CatalogTable, Option[RelationInfo]) = {
     val tableObj = request.getCatalogTable
-    val identifier = TableIdentifier(tableObj.getTableName, Option(tableObj.getSchemaName))
+    val identifier = TableIdentifier(tableObj.getTableName, Option(tableObj.getDatabaseName))
     val tableType = tableObj.getTableType match {
       case "EXTERNAL" => CatalogTableType.EXTERNAL
       case "MANAGED" => CatalogTableType.MANAGED
@@ -134,13 +141,13 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
       val pkCols = toArray(tableObj.getPrimaryKeyColumns)
       if (bucketCount > 0) {
         val allNetUrls = SmartConnectorHelper.setBucketToServerMappingInfo(
-          bucketCount, bucketOwners, session)
+          bucketCount, bucketOwners, conf)
         val partitions = SmartConnectorHelper.getPartitions(allNetUrls)
         table -> Some(RelationInfo(bucketCount, isPartitioned = true, partitionCols,
           indexCols, pkCols, partitions, catalogSchemaVersion))
       } else {
         val allNetUrls = SmartConnectorHelper.setReplicasToServerMappingInfo(
-          tableObj.getBucketOwners.get(0).getSecondaries, session)
+          tableObj.getBucketOwners.get(0).getSecondaries)
         val partitions = SmartConnectorHelper.getPartitions(allNetUrls)
         table -> Some(RelationInfo(1, isPartitioned = false, EMPTY_STRING_ARRAY, indexCols,
           pkCols, partitions, catalogSchemaVersion))
@@ -167,7 +174,7 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
   private[snappydata] def convertToCatalogFunction(
       functionObj: CatalogFunctionObject): CatalogFunction = {
     CatalogFunction(FunctionIdentifier(functionObj.getFunctionName,
-      Option(functionObj.getSchemaName)), functionObj.getClassName,
+      Option(functionObj.getDatabaseName)), functionObj.getClassName,
       functionObj.getResources.asScala.map(functionResource))
   }
 
@@ -201,10 +208,16 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
     }
   }
 
+  private[snappydata] def convertFromCatalogDatabase(
+      catalogDatabase: CatalogDatabase): CatalogSchemaObject = {
+    new CatalogSchemaObject(catalogDatabase.name, catalogDatabase.description,
+      internals.catalogDatabaseLocationURI(catalogDatabase), catalogDatabase.properties.asJava)
+  }
+
   private[snappydata] def convertFromCatalogTable(table: CatalogTable): CatalogTableObject = {
     val storageObj = convertFromCatalogStorage(table.storage)
     // non CatalogTable attributes like indexColumns, buckets will be set by caller
-    // in the GET_CATALOG_SCHEMA system procedure hence filled as empty here
+    // in the GET_CATALOG_DATABASE system procedure hence filled as empty here
     val (numBuckets, bucketColumns, sortColumns) = table.bucketSpec match {
       case None => (-1, Collections.emptyList[String](), Collections.emptyList[String]())
       case Some(spec) => (spec.numBuckets, spec.bucketColumnNames.asJava,
@@ -216,7 +229,7 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
       table.owner, table.createTime, table.lastAccessTime, table.properties.asJava,
       table.unsupportedFeatures.asJava, table.tracksPartitionsInCatalog,
       table.schemaPreservesCase)
-    tableObj.setSchemaName(getOrNull(table.identifier.database))
+    tableObj.setDatabaseName(getOrNull(table.identifier.database))
         .setProvider(getOrNull(table.provider))
         .setViewText(getOrNull(table.viewText))
         .setViewOriginalText(getOrNull(internals.catalogTableViewOriginalText(table)))
@@ -241,7 +254,7 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
       function: CatalogFunction): CatalogFunctionObject = {
     val resources = function.resources.map(r => s"${r.resourceType.resourceType}:${r.uri}")
     new CatalogFunctionObject(function.identifier.funcName,
-      function.className, resources.asJava).setSchemaName(getOrNull(
+      function.className, resources.asJava).setDatabaseName(getOrNull(
       function.identifier.database))
   }
 
@@ -254,12 +267,11 @@ object ConnectorExternalCatalog extends Logging with SparkSupport {
           override def call(): (CatalogTable, Option[RelationInfo]) = {
             logDebug(s"Looking up data source for $name")
             val request = new CatalogMetadataRequest()
-            request.setSchemaName(name._1).setNameOrPattern(name._2)
+            request.setDatabaseName(name._1).setNameOrPattern(name._2)
             val result = catalog.withExceptionHandling(catalog.helper.getCatalogMetadata(
               snappydataConstants.CATALOG_GET_TABLE, request))
             if (!result.isSetCatalogTable) throw new TableNotFoundException(name._1, name._2)
-            val (table, relationInfo) = convertToCatalogTable(result, catalog.session)
-            table -> relationInfo
+            convertToCatalogTable(result, catalog.session.sessionState.conf)
           }
         })
       case result => result

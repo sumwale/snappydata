@@ -31,12 +31,11 @@ import shapeless.{::, HNil}
 
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.aggregate.{First, Last}
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, FunctionIdentifier, TableIdentifier}
-import org.apache.spark.sql.collection.Utils
+import org.apache.spark.sql.collection.{ToolsCallbackInit, Utils}
 import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.{ShowSnappyTablesCommand, ShowViewsCommand}
 import org.apache.spark.sql.internal.LikeEscapeSimplification
@@ -270,8 +269,9 @@ class SnappyParser(session: SnappySession)
   }
 
   protected[sql] final def newCachedLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
-    if (cacheLiteral && session.planCaching) addParamLiteralToContext(v, dataType)
-    else new TokenLiteral(v, dataType)
+    if (cacheLiteral && (session ne null) && session.planCaching) {
+      addParamLiteralToContext(v, dataType)
+    } else new TokenLiteral(v, dataType)
   }
 
   protected final def newLiteral(v: Any, dataType: DataType): TokenizedLiteral = {
@@ -426,8 +426,17 @@ class SnappyParser(session: SnappySession)
     case null => exprs
     case args if args.length == 0 =>
       // disable plan caching for these functions
-      session.planCaching = false
-      exprs
+      if (session ne null) session.planCaching = false
+      exprs.map(_.transformUp {
+        case l: TokenizedLiteral => l match {
+          case pl: ParamLiteral  if pl.isTokenized && _isPreparePhase =>
+            throw new ParseException(s"function $fnName cannot have " +
+              s"parameterized argument")
+          case _ =>
+        }
+        removeIfParamLiteralFromContext(l)
+        newLiteral(l.value, l.dataType)
+      })
     case args =>
       exprs.indices.map(index => exprs(index).transformUp {
         case l: TokenizedLiteral if (args(0) == -3 && !Ints.contains(args, index)) ||
@@ -495,19 +504,17 @@ class SnappyParser(session: SnappySession)
       case Some(s) => CreateStruct(s.asInstanceOf[Seq[Expression]])
     }) |
     FIRST ~ O_PAREN ~ expression ~ (
-        IGNORE ~ NULLS ~> ((e: Expression) =>
-          First(e, newLiteral(true, BooleanType)).toAggregateExpression()) |
-        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
-          Consts.FIRST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
-              Seq[Expression]].toIndexedSeq, Consts.FIRST.lower), isDistinct = false))
-    ) ~ C_PAREN |
+        IGNORE ~ NULLS ~ push(newLiteral(true, BooleanType) :: Nil) |
+        (commaSep ~ expression).*
+    ) ~ C_PAREN ~> ((e: Expression, args: Any) => UnresolvedFunction(
+      Consts.FIRST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
+          Seq[Expression]].toIndexedSeq, Consts.FIRST.lower), isDistinct = false)) |
     LAST ~ O_PAREN ~ expression ~ (
-        IGNORE ~ NULLS ~> ((e: Expression) =>
-          Last(e, newLiteral(true, BooleanType)).toAggregateExpression()) |
-        (commaSep ~ expression).* ~> ((e: Expression, args: Any) => UnresolvedFunction(
-          Consts.LAST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
-              Seq[Expression]].toIndexedSeq, Consts.LAST.lower), isDistinct = false))
-    ) ~ C_PAREN |
+        IGNORE ~ NULLS ~ push(newLiteral(true, BooleanType) :: Nil) |
+        (commaSep ~ expression).*
+    ) ~ C_PAREN ~> ((e: Expression, args: Any) => UnresolvedFunction(
+      Consts.LAST.lower, foldableFunctionsExpressionHandler(e +: args.asInstanceOf[
+          Seq[Expression]].toIndexedSeq, Consts.LAST.lower), isDistinct = false)) |
     POSITION ~ O_PAREN ~ expression ~ (
         IN ~ expression ~> ((sub: Expression, str: Expression) => new StringLocate(sub, str)) |
         (commaSep ~ expression). + ~> ((sub: Expression, args: Any) => UnresolvedFunction(
@@ -597,7 +604,7 @@ class SnappyParser(session: SnappySession)
         ) |
         // noinspection ScalaUnnecessaryParentheses
         query ~ C_PAREN ~> { (plan: LogicalPlan) =>
-          session.planCaching = false // never cache scalar subquery plans
+          if (session ne null) session.planCaching = false // never cache scalar subquery plans
           ScalarSubquery(plan)
         }
     ) |
@@ -1049,8 +1056,7 @@ class SnappyParser(session: SnappySession)
     distributeBy |
     CLUSTER ~ BY ~ (expression + commaSep) ~> ((e: Seq[Expression]) =>
       (l: LogicalPlan) => Sort(e.map(SortOrder(_, Ascending)), global = false,
-        internals.newRepartitionByExpression(e,
-          session.sessionState.conf.numShufflePartitions, l)))).? ~
+        internals.newRepartitionByExpression(e, sqlConf.numShufflePartitions, l)))).? ~
     (WINDOW ~ ((identifier ~ AS ~ windowSpec ~>
         ((id: String, w: WindowSpec) => id -> w)) + commaSep)).? ~
     ((LIMIT ~ (capture(ALL) | CACHE_LITERAL_SKIP ~ expression ~ CACHE_LITERAL_RESTORE)) |
@@ -1098,8 +1104,7 @@ class SnappyParser(session: SnappySession)
 
   protected final def distributeBy: Rule1[LogicalPlan => LogicalPlan] = rule {
     DISTRIBUTE ~ BY ~ (expression + commaSep) ~> ((e: Seq[Expression]) =>
-      (l: LogicalPlan) => internals.newRepartitionByExpression(
-        e, session.sessionState.conf.numShufflePartitions, l))
+      (l: LogicalPlan) => internals.newRepartitionByExpression(e, sqlConf.numShufflePartitions, l))
   }
 
   protected final def windowSpec: Rule1[WindowSpec] = rule {
@@ -1248,8 +1253,8 @@ class SnappyParser(session: SnappySession)
           }
           // use Spark 2.4 behaviour for HAVING without GROUP BY
           if (gr.isEmpty &&
-              !session.conf.get("spark.sql.legacy.parser.havingWithoutGroupByAsWhere", "false")
-                  .equalsIgnoreCase("true")) {
+              !sqlConf.getConfString("spark.sql.legacy.parser.havingWithoutGroupByAsWhere",
+                "false").equalsIgnoreCase("true")) {
             withProjection = Aggregate(Nil, expressions, withFilter(base))
           }
           internals.newUnresolvedHaving(predicate, withProjection)
@@ -1433,12 +1438,12 @@ class SnappyParser(session: SnappySession)
   protected def show: Rule1[LogicalPlan] = rule {
     SHOW ~ TABLES ~ ((FROM | IN) ~ identifier).? ~ (LIKE.? ~ stringLiteral).? ~>
         ((id: Any, pat: Any) => new ShowSnappyTablesCommand(
-          id.asInstanceOf[Option[String]], pat.asInstanceOf[Option[String]], session)) |
+          id.asInstanceOf[Option[String]], pat.asInstanceOf[Option[String]], sqlConf)) |
     SHOW ~ TABLE ~ ANY. + ~> (() => sparkParser.parsePlan(input.sliceString(0, input.length))) |
     SHOW ~ VIEWS ~ ((FROM | IN) ~ identifier).? ~ (LIKE.? ~ stringLiteral).? ~>
-        ((id: Any, pat: Any) => ShowViewsCommand(session,
+        ((id: Any, pat: Any) => ShowViewsCommand(sqlConf,
           id.asInstanceOf[Option[String]], pat.asInstanceOf[Option[String]])) |
-    SHOW ~ (SCHEMAS | DATABASES) ~ (LIKE.? ~ stringLiteral).? ~> ((pat: Any) =>
+    SHOW ~ DATABASES ~ (LIKE.? ~ stringLiteral).? ~> ((pat: Any) =>
       ShowDatabasesCommand(pat.asInstanceOf[Option[String]])) |
     SHOW ~ COLUMNS ~ (FROM | IN) ~ tableIdentifier ~ ((FROM | IN) ~ identifier).? ~>
         ((table: TableIdentifier, db: Any) =>
@@ -1570,26 +1575,30 @@ class SnappyParser(session: SnappySession)
 
   override protected def start: Rule1[LogicalPlan] = rule {
     query.named("select") | insert | put | update | delete | dmlOperation | ddl | show |
-    set | reset | cache | uncache | deployPackages | explain | analyze | delegateToSpark
+    useDatabase | set | reset | cache | uncache | explain | analyze |
+    (test(ToolsCallbackInit.toolsCallback ne null) ~ deployPackages) | delegateToSpark
   }
 
   private def initConf(): Unit = {
-    val conf = session.sessionState.conf
-    caseSensitive = conf.caseSensitiveAnalysis
-    session.planCaching = Property.PlanCaching.get(conf)
-    escapedStringLiterals = conf.getConfString(
+    caseSensitive = sqlConf.caseSensitiveAnalysis
+    escapedStringLiterals = sqlConf.getConfString(
       "spark.sql.parser.escapedStringLiterals", "false").equalsIgnoreCase("true")
-    sparkCompatible = !Property.Compatibility.get(conf).equalsIgnoreCase("snappy")
-    quotedRegexColumnNames = conf.getConfString(
+    sparkCompatible = !Property.Compatibility.get(sqlConf).equalsIgnoreCase("snappy")
+    quotedRegexColumnNames = sqlConf.getConfString(
       "spark.sql.parser.quotedRegexColumnNames", "false").equalsIgnoreCase("true")
-    legacySetOpsPrecedence = conf.getConfString(
+    legacySetOpsPrecedence = sqlConf.getConfString(
       "spark.sql.legacy.setopsPrecedence.enabled", "false").equalsIgnoreCase("true")
   }
 
+  @inline
+  protected final def syncObject: AnyRef = if (session ne null) session else this
+
   final def parse[T](sqlText: String, parseRule: => Try[T],
-      clearExecutionData: Boolean = false): T = session.synchronized {
-    session.clearQueryData()
-    if (clearExecutionData) session.snappySessionState.clearExecutionData()
+      clearExecutionData: Boolean = false): T = syncObject.synchronized {
+    if (session ne null) {
+      session.clearQueryData()
+      if (clearExecutionData) session.snappySessionState.clearExecutionData()
+    }
     val plan = parseSQLOnly(sqlText, parseRule)
     if (allHints.nonEmpty && (session ne null)) {
       session.addQueryHints(allHints, replace = false)
@@ -1598,14 +1607,14 @@ class SnappyParser(session: SnappySession)
   }
 
   /** Parse SQL without any other handling like query hints */
-  def parseSQLOnly[T](sqlText: String, parseRule: => Try[T]): T = session.synchronized {
+  def parseSQLOnly[T](sqlText: String, parseRule: => Try[T]): T = syncObject.synchronized {
     this.input = sqlText
     initConf()
     parseRule match {
       case Success(p) => p
       case Failure(e: ParseError) =>
         throw new ParseException(formatError(e, new ErrorFormatter(showTraces =
-            (session ne null) && Property.ParserTraceError.get(session.sessionState.conf))))
+            Property.ParserTraceError.get(sqlConf))))
       case Failure(e) =>
         throw new ParseException(e.toString, Some(e))
     }

@@ -29,7 +29,9 @@ import scala.language.implicitConversions
 import scala.util.control.NonFatal
 
 import com.gemstone.gemfire.CancelException
+import com.pivotal.gemfirexd.internal.engine.Misc
 import com.pivotal.gemfirexd.internal.engine.ui.{MemberStatistics, SnappyExternalTableStats, SnappyIndexStats, SnappyRegionStats}
+import io.snappydata.recovery.RecoveryService
 
 import org.apache.spark.sql.SnappySession
 import org.apache.spark.sql.collection.Utils
@@ -47,7 +49,7 @@ trait TableStatsProviderService extends Logging {
 
   @GuardedBy("this")
   protected var memberStatsFuture: Option[Future[Unit]] = None
-  protected val waitDuration = Duration(5000L, TimeUnit.MILLISECONDS)
+  protected val waitDuration: Duration = Duration(5000L, TimeUnit.MILLISECONDS)
 
   @volatile protected var doRun: Boolean = false
   @volatile private var running: Boolean = false
@@ -56,7 +58,8 @@ trait TableStatsProviderService extends Logging {
 
   protected def aggregateStats(): Unit = synchronized {
     try {
-      if (doRun) {
+      // TODO: Need to be addressed - Disabling aggregateStats as a temporary fix.
+      if (doRun && (Misc.getGemFireCacheNoThrow ne null)) {
         val prevTableSizeInfo = tableSizeInfo
         running = true
         try {
@@ -68,7 +71,7 @@ trait TableStatsProviderService extends Logging {
           // Commenting this call to avoid periodic refresh of members stats
           // get members details
           // fillAggregatedMemberStatsOnDemand()
-          val memInfo = getMembersStatsOnDemand
+          getMembersStatsOnDemand
 
         } finally {
           running = false
@@ -185,7 +188,10 @@ trait TableStatsProviderService extends Logging {
   def getAggregatedStatsOnDemand: (Map[String, SnappyRegionStats],
       Map[String, SnappyIndexStats], Map[String, SnappyExternalTableStats]) = {
     if (!doRun) return (Map.empty, Map.empty, Map.empty)
-    val (tableStats, indexStats, externalTableStats) = getStatsFromAllServers()
+    val cache = Misc.getGemFireCacheNoThrow
+    val (tableStats, indexStats, externalTableStats) =
+      if ((cache ne null) && cache.isSnappyRecoveryMode) RecoveryService.getStats
+      else getStatsFromAllServers()
 
     val aggregatedStats = scala.collection.mutable.Map[String, SnappyRegionStats]()
     val aggregatedExtTableStats = scala.collection.mutable.Map[String, SnappyExternalTableStats]()

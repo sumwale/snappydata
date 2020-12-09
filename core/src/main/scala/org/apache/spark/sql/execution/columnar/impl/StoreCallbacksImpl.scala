@@ -119,9 +119,9 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
           val indexes = if ((dependents ne null) && dependents.length != 0) {
             val catalog = Misc.getMemStoreBooting.getExistingExternalCatalog
             dependents.toSeq.flatMap { dep =>
-              val (depSchema, depTable) = SnappyExternalCatalog.getTableWithSchema(
+              val (depDb, depTable) = SnappyExternalCatalog.getTableWithDatabase(
                 dep, container.getSchemaName)
-              val metadata = catalog.getCatalogTableMetadata(depSchema, depTable)
+              val metadata = catalog.getCatalogTableMetadata(depDb, depTable)
               if ((metadata ne null) && metadata.tableType == CatalogObjectType.Index.toString) {
                 Some(metadata)
               } else None
@@ -167,10 +167,10 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
     }
   }
 
-  def getInternalTableSchemas: java.util.List[String] = {
-    val schemas = new java.util.ArrayList[String](1)
-    schemas.add(SystemProperties.SNAPPY_HIVE_METASTORE)
-    schemas
+  def getInternalTableDatabases: java.util.List[String] = {
+    val databases = new java.util.ArrayList[String](1)
+    databases.add(SystemProperties.SNAPPY_HIVE_METASTORE)
+    databases
   }
 
   override def isColumnTable(qualifiedName: String): Boolean =
@@ -547,9 +547,10 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
 
   override def refreshPolicies(ldapGroup: String): Unit = {
     SnappyHiveExternalCatalog.getExistingInstance.refreshPolicies(ldapGroup)
+    ToolsCallbackInit.toolsCallback.refreshLdapGroupCallback(ldapGroup)
   }
 
-  override def checkSchemaPermission(schemaName: String, currentUser: String): String = {
+  override def checkDatabasePermission(dbName: String, currentUser: String): String = {
     val ms = Misc.getMemStoreBootingNoThrow
     val userId = IdUtil.getUserAuthorizationId(currentUser)
     if (ms ne null) {
@@ -561,17 +562,17 @@ object StoreCallbacksImpl extends StoreCallbacks with SparkSupport with Logging 
           conn = GemFireXDUtils.getTSSConnection(false, true, false)
           conn.getTR.setupContextStack()
           contextSet = true
-          val schema = Utils.toUpperCase(schemaName)
+          val db = Utils.toUpperCase(dbName)
           val sd = dd.getSchemaDescriptor(
-            schema, conn.getLanguageConnection.getTransactionExecute, false)
+            db, conn.getLanguageConnection.getTransactionExecute, false)
           if (sd eq null) {
-            if (schema.equalsIgnoreCase(userId) ||
-                schema.equalsIgnoreCase(userId.replace('-', '_'))) {
+            if (db.equalsIgnoreCase(userId) ||
+                db.equalsIgnoreCase(userId.replace('-', '_'))) {
               if (ms.tableCreationAllowed()) return userId
               throw StandardException.newException(SQLState.AUTH_NO_ACCESS_NOT_OWNER,
-                schema, schema)
+                db, db)
             } else {
-              throw StandardException.newException(SQLState.LANG_SCHEMA_DOES_NOT_EXIST, schema)
+              throw StandardException.newException(SQLState.LANG_SCHEMA_DOES_NOT_EXIST, db)
             }
           }
           PrivilegeInfo.checkOwnership(userId, sd, sd, dd)

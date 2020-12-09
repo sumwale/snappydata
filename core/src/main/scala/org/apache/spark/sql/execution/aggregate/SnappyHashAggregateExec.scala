@@ -52,7 +52,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.columnar.encoding.ColumnEncoding
+import org.apache.spark.sql.execution.columnar.encoding.{ColumnEncoding, StringDictionary}
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{SnappySession, SparkSupport, collection}
@@ -91,6 +91,20 @@ case class SnappyHashAggregateExec(
         groupingExpressions.forall(e => SHAMapAccessor.supportedDataTypes(e.dataType)) &&
         !useOldImplementationForSingleKey
   }
+
+  private val codeSplitFuncParamsSize = Property.TestCodeSplitFunctionParamsSizeInSHA.
+      get(sqlContext.sparkSession.sessionState.conf)
+
+  private val codeSplitThresholdSize = Property.TestCodeSplitThresholdInSHA.
+      get(sqlContext.sparkSession.sessionState.conf)
+
+  private val splitAggCode = this.aggregateAttributes.length > this.codeSplitThresholdSize &&
+      !this.groupingExpressions.exists(_.dataType match {
+        case _: ArrayType | _: StructType => true
+        case _ => false
+      })
+
+  private val splitGroupByKeyCode = this.groupingExpressions.length > this.codeSplitThresholdSize
 
   override def nodeName: String =
     if (useByteBufferMapBasedAggregation) "BufferMapHashAggregate" else "SnappyHashAggregate"
@@ -223,8 +237,6 @@ case class SnappyHashAggregateExec(
     child.asInstanceOf[CodegenSupport].inputRDDs()
   }
 
-
-
   override protected def doProduce(ctx: CodegenContext): String = {
     if (groupingExpressions.isEmpty) {
       doProduceWithoutKeys(ctx)
@@ -255,34 +267,47 @@ case class SnappyHashAggregateExec(
     // check for possible optimized dictionary code path;
     // below is a loose search while actual decision will be taken as per
     // availability of ExprCodeEx with DictionaryCode in doConsume
-   if (useByteBufferMapBasedAggregation) {
-     false
-   } else {
-     DictionaryOptimizedMapAccessor.canHaveSingleKeyCase(
-       keyBufferAccessor.keyExpressions)
-   }
+   val keyExprs = if (useByteBufferMapBasedAggregation) byteBufferAccessor.keyExprs
+    else keyBufferAccessor.keyExpressions
+
+    DictionaryOptimizedMapAccessor.canHaveSingleKeyCase(
+      keyExprs)
   }
 
   override def batchConsume(ctx: CodegenContext, plan: SparkPlan,
-      input: Seq[ExprCode]): String = {
-    if (groupingExpressions.isEmpty || !canConsume(plan) ) ""
+      input: Seq[ExprCode]): String =
+    if (groupingExpressions.isEmpty || !canConsume(plan)) ""
     else {
       // create an empty method to populate the dictionary array
       // which will be actually filled with code in consume if the dictionary
       // optimization is possible using the incoming DictionaryCode
-      val className = keyBufferAccessor.getClassName
       // this array will be used at batch level for grouping if possible
-      dictionaryArrayTerm = ctx.freshName("dictionaryArray")
       dictionaryArrayInit = ctx.freshName("dictionaryArrayInit")
-      dictionaryArrayInit = internals.addFunction(ctx, dictionaryArrayInit,
-        s"""
-           |private $className[] $dictionaryArrayInit() {
-           |  return null;
-           |}
-         """.stripMargin)
-      s"final $className[] $dictionaryArrayTerm = $dictionaryArrayInit();"
+      dictionaryArraySize = ctx.freshName("dictionaryArraySize")
+      if (useByteBufferMapBasedAggregation) {
+        dictionaryArraySizeField = internals.addClassField(ctx, "int",
+          "dictionaryArraySizeField", v => s"$v = -1;")
+        internals.addFunction(ctx, dictionaryArrayInit,
+          s"""
+             |private void $dictionaryArrayInit() {
+             |}
+          """.stripMargin, inlineToOuterClass = true)
+
+        s"""$dictionaryArrayInit();
+            |final int $dictionaryArraySize = $dictionaryArraySizeField;
+         """.stripMargin
+      } else {
+        dictionaryArrayTerm = ctx.freshName("dictionaryArray")
+        val className = keyBufferAccessor.getClassName
+        internals.addFunction(ctx, dictionaryArrayInit,
+          s"""
+             |private $className[] $dictionaryArrayInit() {
+             |  return null;
+             |}
+         """.stripMargin, inlineToOuterClass = true)
+        s"$className[] $dictionaryArrayTerm = $dictionaryArrayInit();"
+      }
     }
-  }
 
   // The variables used as aggregation buffer
   @transient protected var bufVars: Seq[ExprCode] = _
@@ -447,6 +472,8 @@ case class SnappyHashAggregateExec(
   @transient private var maskTerm: String = _
   @transient private var dictionaryArrayTerm: String = _
   @transient private var dictionaryArrayInit: String = _
+  @transient private var dictionaryArraySizeField: String = _
+  @transient private var dictionaryArraySize: String = _
 
   /**
    * Generate the code for output.
@@ -512,7 +539,9 @@ case class SnappyHashAggregateExec(
 
   private def generateResultCodeForSHAMap(
     ctx: CodegenContext, keyBufferVars: Seq[ExprCode],
-    aggBufferVars: Seq[ExprCode], iterValueOffsetTerm: String): String = {
+    aggBufferVars: Seq[ExprCode], iterValueOffsetTerm: String,
+    stateArrayVarOptForKey: Option[String],
+    stateArrayVarOptForAggs: Option[String]): String = {
     /* Asif: It appears that we have to put the code of materialization of each grouping column
     & aggregate before we can send it to parent. The reason is following:
     1) In the byte buffer hashmap data is written consecutively i.e key1, key2 agg1 etc.
@@ -524,6 +553,59 @@ case class SnappyHashAggregateExec(
      We need to resolve this issue. I suppose we can declare  local variable pointers pointing to start location
      of each key/aggregate & use those declared pointers in the materialization code for each key
      */
+    def keyValueEvalCode(evaluatedKeyVars: String,
+        evaluatedBufferVarsOpt: Option[String]): String = {
+
+      val bufferEvalCode = evaluatedBufferVarsOpt.map(evaluatedBufferVars => {
+        val aggReadSnippet =
+          s"""${
+            byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
+              byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits)
+          }
+             |${
+            stateArrayVarOptForAggs.map(stateArrayVar =>
+              s"$stateArrayVar[0] = $iterValueOffsetTerm;").getOrElse("")
+          }
+             |$evaluatedBufferVars
+             |${
+            stateArrayVarOptForAggs.map(stateArrayVar =>
+              s"$iterValueOffsetTerm = (Long)$stateArrayVar[0];").getOrElse("")
+          }
+         """.stripMargin
+        if (splitAggCode) {
+          val nullBitsCastTerm = if (SHAMapAccessor.
+            isByteArrayNeededForNullBits(byteBufferAccessor.numBytesForNullAggBits)) {
+            "byte[]"
+          } else SHAMapAccessor.getNullBitsCastTerm(byteBufferAccessor.numBytesForNullAggBits)
+          var funcName = ctx.freshName("readAggFromBBMap")
+          val methodParams = s"long $iterValueOffsetTerm," +
+            s" Object ${byteBufferAccessor.vdBaseObjectTerm}," +
+            s" $nullBitsCastTerm ${byteBufferAccessor.nullAggsBitsetTerm}"
+          funcName = internals.addFunction(ctx, funcName,
+            s"""
+               |private long $funcName($methodParams) {
+               |  $aggReadSnippet
+               |  return $iterValueOffsetTerm;
+               |}
+            """.stripMargin)
+          s"$iterValueOffsetTerm = $funcName($iterValueOffsetTerm," +
+            s" ${byteBufferAccessor.vdBaseObjectTerm}, ${byteBufferAccessor.nullAggsBitsetTerm});"
+        } else aggReadSnippet
+
+      }).getOrElse("")
+
+      s"""
+         |${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
+              byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
+         |${stateArrayVarOptForKey.map(stateArrayVar =>
+              s"$stateArrayVar[0] = $iterValueOffsetTerm;").getOrElse("")}
+         |$evaluatedKeyVars
+         |${stateArrayVarOptForKey.map(stateArrayVar =>
+              s"$iterValueOffsetTerm = (Long)$stateArrayVar[0];").getOrElse("")}
+         |$bufferEvalCode
+      """.stripMargin
+    }
+
     if (modes.contains(Final) || modes.contains(Complete)) {
       // generate output extracting from ExprCodes
       ctx.INPUT_ROW = null
@@ -552,18 +634,13 @@ case class SnappyHashAggregateExec(
       }
       val evaluateNondeterministicResults =
         evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
+
       s"""
-       ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
-        byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
-       $evaluateKeyVars
-       ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
-        byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits)}
-       $evaluateBufferVars
+       ${keyValueEvalCode(evaluateKeyVars, Some(evaluateBufferVars))}
        $evaluateAggResults
        $evaluateNondeterministicResults
        ${consume(ctx, resultVars)}
       """
-
     } else if (modes.contains(Partial) || modes.contains(PartialMerge)) {
       // Combined grouping keys and aggregate values in buffer
       var evaluateKeyVars = evaluateVariables(keyBufferVars)
@@ -581,12 +658,7 @@ case class SnappyHashAggregateExec(
       }
       evaluateBufferVars += evaluateVariables(bufferVars)
       s"""
-       ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
-        byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
-       $evaluateKeyVars
-       ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
-        byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits)}
-       $evaluateBufferVars
+       ${keyValueEvalCode(evaluateKeyVars, Some(evaluateBufferVars))}
        ${consume(ctx, keyBufferVars ++ aggBufferVars)}
        """
     } else {
@@ -605,9 +677,7 @@ case class SnappyHashAggregateExec(
         evaluateNondeterministicExpressions(output, resultVars, resultExpressions)
 
       s"""
-       ${byteBufferAccessor.readNullBitsCode(iterValueOffsetTerm,
-        byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits)}
-       $evaluateKeyVars
+       ${keyValueEvalCode(evaluateKeyVars, None)}
        $evaluateNondeterministicResults
        ${consume(ctx, resultVars)}
       """
@@ -689,10 +759,14 @@ case class SnappyHashAggregateExec(
     val valueOffsetTerm = ctx.freshName("valueOffset")
     val currentValueOffSetTerm = ctx.freshName("currentValueOffSet")
 
-    val valueDataTerm = internals.addClassField(ctx, bbDataClass, "valueData")
-    val vdBaseObjectTerm = internals.addClassField(ctx, "Object", "vdBaseObjectTerm")
-    val vdBaseOffsetTerm = internals.addClassField(ctx, "long", "vdBaseOffsetTerm")
-    val valueDataCapacityTerm = internals.addClassField(ctx, "int", "valueDataCapacity")
+    val valueDataTerm = internals.addClassField(ctx, bbDataClass, "valueData",
+      forceInline = true)
+    val vdBaseObjectTerm = internals.addClassField(ctx, "Object", "vdBaseObjectTerm",
+      forceInline = true)
+    val vdBaseOffsetTerm = internals.addClassField(ctx, "long", "vdBaseOffsetTerm",
+      forceInline = true)
+    val valueDataCapacityTerm = internals.addClassField(ctx, "int", "valueDataCapacity",
+      forceInline = true)
 
     var doAgg = ctx.freshName("doAggregateWithKeys")
     var setBBMap = ctx.freshName("setBBMap")
@@ -763,10 +837,14 @@ case class SnappyHashAggregateExec(
     val gfeCacheImplClass = classOf[GemFireCacheImpl].getName
     val byteBufferClass = classOf[ByteBuffer].getName
 
-    val keyBytesHolderVar = internals.addClassField(ctx, byteBufferClass, "keyBytesHolder")
-    val baseKeyHolderOffset = internals.addClassField(ctx, "long", "baseKeyHolderOffset")
-    val baseKeyObject = internals.addClassField(ctx, "Object", "baseKeyHolderObject")
-    val keyHolderCapacityTerm = internals.addClassField(ctx, "int", "keyholderCapacity")
+    val keyBytesHolderVar = internals.addClassField(ctx, byteBufferClass, "keyBytesHolder",
+      forceInline = true)
+    val baseKeyHolderOffset = internals.addClassField(ctx, "long", "baseKeyHolderOffset",
+      forceInline = true)
+    val baseKeyObject = internals.addClassField(ctx, "Object", "baseKeyHolderObject",
+      forceInline = true)
+    val keyHolderCapacityTerm = internals.addClassField(ctx, "int", "keyholderCapacity",
+      forceInline = true)
 
     val keyExistedTerm = ctx.freshName("keyExisted")
 
@@ -791,8 +869,12 @@ case class SnappyHashAggregateExec(
          |(int)($localIterValueOffsetTerm - $localIterValueStartOffsetTerm)
          |${ if (keysToProcessSize.nonEmpty) s" - ($suffixSize)" else ""};""".stripMargin
     } else ""
+    val useCustomHashMap = groupingAttributes.size == 1 &&
+      (TypeUtilities.isFixedWidth(groupingAttributes.head.dataType) ||
+       groupingAttributes.head.dataType.isInstanceOf[StringType])
 
-    val hashSetClassName = classOf[SHAMap].getName
+    val shaMapClassName = classOf[SHAMap].getName
+    val hashSetClassName = if (useCustomHashMap) ctx.freshName("CustomSHAMap") else shaMapClassName
     val listClassName = classOf[java.util.List[SHAMap]].getName
     val iterClassName = classOf[java.util.Iterator[SHAMap]].getName
     // generate variable name for hash map for use here and in consume
@@ -803,12 +885,13 @@ case class SnappyHashAggregateExec(
       "overflowMapIter", v => s"$v = null;")
 
     val storedAggNullBitsTerm = ctx.freshName("storedAggNullBit")
+
     val cacheStoredAggNullBits = !SHAMapAccessor.isByteArrayNeededForNullBits(
-      numBytesForNullAggsBits) && numBytesForNullAggsBits > 0
+      numBytesForNullAggsBits) && numBytesForNullAggsBits > 0 && !splitAggCode
 
     val storedKeyNullBitsTerm = ctx.freshName("storedKeyNullBit")
     val cacheStoredKeyNullBits = !SHAMapAccessor.isByteArrayNeededForNullBits(
-      numBytesForNullKeyBits) && numBytesForNullKeyBits > 0
+      numBytesForNullKeyBits) && numBytesForNullKeyBits > 0 && !splitAggCode
 
     // generate the map accessor to generate key/value class
     // and get map access methods
@@ -823,6 +906,14 @@ case class SnappyHashAggregateExec(
        SHAMapAccessor.sizeForNullBits(numBytesForNullKeyBits)  + numValueBytes -
       (if (skipLenForAttrib != -1) 4 else 0)
 
+    val previousSingleKey_Position_LengthTerm = if (useCustomHashMap &&
+      (SHAMapAccessor.isPrimitive(keysDataType.head) ||
+        keysDataType.head.isInstanceOf[StringType])) {
+      Some((ctx.freshName("previousSingleKey"), ctx.freshName("previousValuePosition"),
+        ctx.freshName("previousKeyLength")))
+    } else {
+      None
+    }
 
     byteBufferAccessor = SHAMapAccessor(session, ctx, groupingExpressions,
       aggregateBufferAttributesForGroup, "ByteBuffer", hashMapTerm, overflowHashMapsTerm,
@@ -834,13 +925,35 @@ case class SnappyHashAggregateExec(
       skipLenForAttrib, codeForLenOfSkippedTerm, valueDataCapacityTerm,
       if (cacheStoredAggNullBits) Some(storedAggNullBitsTerm) else None,
       if (cacheStoredKeyNullBits) Some(storedKeyNullBitsTerm) else None,
-      aggregateBufferVars, keyHolderCapacityTerm)
+      aggregateBufferVars, keyHolderCapacityTerm, hashSetClassName,
+      useCustomHashMap, previousSingleKey_Position_LengthTerm,
+      codeSplitFuncParamsSize, splitAggCode, splitGroupByKeyCode)
+
+    if (useCustomHashMap) {
+      internals.addFunction(ctx, hashSetClassName, byteBufferAccessor.
+        generateCustomSHAMapClass(hashSetClassName, keysDataType.head), inlineToOuterClass = true)
+    }
 
     val maxMemory = ctx.freshName("maxMemory")
     val peakMemory = metricTerm(ctx, "peakMemory")
 
     val childProduce =
       childProducer.asInstanceOf[CodegenSupport].produce(ctx, this)
+    val previousSingleKey_Position_LengthCode = previousSingleKey_Position_LengthTerm match {
+      case Some((keyTerm, posTerm, lenTerm)) =>
+        val paramDataType = if (SHAMapAccessor.isPrimitive(keysDataType.head)) {
+          internals.javaType(keysDataType.head, ctx)
+        } else {
+          "int"
+        }
+        s"""
+          |$paramDataType $keyTerm = ${if (keysDataType.head.isInstanceOf[StringType]) "-1"
+               else internals.defaultValue(keysDataType.head, ctx)};
+          |int $lenTerm = 0;
+          |long $posTerm = -1L;
+        """.stripMargin
+      case None => ""
+    }
     doAgg = internals.addFunction(ctx, doAgg,
       s"""private void $doAgg() throws java.io.IOException {
            |$hashMapTerm = new $hashSetClassName(${Property.initialCapacityOfSHABBMap.get(
@@ -857,14 +970,12 @@ case class SnappyHashAggregateExec(
            |$vdBaseObjectTerm = $valueDataTerm.baseObject();
            |$vdBaseOffsetTerm = $valueDataTerm.baseOffset();
            |$valueDataCapacityTerm = $valueDataTerm.capacity();
+           |$previousSingleKey_Position_LengthCode
            |${SHAMapAccessor.initNullBitsetCode(nullKeysBitsetTerm, numBytesForNullKeyBits,
               ctx, genClassField = true)}
            |${SHAMapAccessor.initNullBitsetCode(nullAggsBitsetTerm, numBytesForNullAggsBits,
               ctx, genClassField = true)}
-           |${byteBufferAccessor.initKeyOrBufferVal(aggBuffDataTypes, aggregateBufferVars,
-              genClassField = true)}
-           |${byteBufferAccessor.declareNullVarsForAggBuffer(aggregateBufferVars,
-              genClassField = true)}
+
            |${ if (cacheStoredAggNullBits) {
                  SHAMapAccessor.initNullBitsetCode(storedAggNullBitsTerm,
                    numBytesForNullAggsBits, ctx, genClassField = true)
@@ -913,20 +1024,30 @@ case class SnappyHashAggregateExec(
            |}
          |}""".stripMargin)
 
-    // generate code for output
-    /*  val keyBufferTerm = ctx.freshName("keyBuffer")
-      val (initCode, keyBufferVars, _) = keyBufferAccessor.getColumnVars(
-        keyBufferTerm, keyBufferTerm, onlyKeyVars = false, onlyValueVars = false) */
+    val (stateArrayVarOptForKey, keysExpr) = byteBufferAccessor.readVarsFromBBMap(keysDataType,
+      KeyBufferVars, localIterValueOffsetTerm, isKey = true,
+      byteBufferAccessor.nullKeysBitsetTerm, byteBufferAccessor.numBytesForNullKeyBits,
+      byteBufferAccessor.numBytesForNullKeyBits == 0, splitGroupByKeyCode, None)
 
-    val keysExpr = byteBufferAccessor.getBufferVars(keysDataType, KeyBufferVars,
-      localIterValueOffsetTerm, isKey = true, byteBufferAccessor.nullKeysBitsetTerm,
-      byteBufferAccessor.numBytesForNullKeyBits,
-      skipNullBitsCode = byteBufferAccessor.numBytesForNullKeyBits == 0)
-    val aggsExpr = byteBufferAccessor.getBufferVars(aggBuffDataTypes,
-      aggregateBufferVars, localIterValueOffsetTerm, isKey = false,
-      byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits,
-      skipNullBitsCode = false)
-    val outputCode = generateResultCodeForSHAMap(ctx, keysExpr, aggsExpr, localIterValueOffsetTerm)
+    val aggBufferVarsForProcessNext = if (splitAggCode) {
+      val numberClass = classOf[Number].getName
+      val aggBuffValueArrayTerm = internals.addClassField(ctx, s"$numberClass[]",
+        "aggBuffValueArray", v => s"$v = new $numberClass[${aggBuffDataTypes.length}];")
+      val aggBuffNullArrayTerm = internals.addClassField(ctx, s"boolean[]",
+        "aggBuffNullArray", v => s"$v = new boolean[${aggBuffDataTypes.length}];")
+      Some(aggBuffDataTypes.zipWithIndex.map {
+        case (_, index) => s"$aggBuffValueArrayTerm[$index]" -> s"$aggBuffNullArrayTerm[$index]"
+      }.unzip)
+    } else None
+
+    val (stateArrayVarOptForAggs, aggsExpr) = byteBufferAccessor.readVarsFromBBMap(aggBuffDataTypes,
+      aggBufferVarsForProcessNext.map(_._1).getOrElse(aggregateBufferVars),
+      localIterValueOffsetTerm, isKey = false, byteBufferAccessor.nullAggsBitsetTerm,
+      byteBufferAccessor.numBytesForNullAggBits, skipNullBitsCode = false, splitCode = splitAggCode,
+      aggBufferVarsForProcessNext.map(_._2), aggBufferVarsForProcessNext.isDefined)
+
+    val outputCode = generateResultCodeForSHAMap(ctx, keysExpr, aggsExpr, localIterValueOffsetTerm,
+      stateArrayVarOptForKey, stateArrayVarOptForAggs)
     val numOutput = metricTerm(ctx, "numOutputRows")
     val localNumRowsIterated = ctx.freshName("localNumRowsIterated")
     // The child could change `copyResult` to true, but we had already
@@ -945,6 +1066,7 @@ case class SnappyHashAggregateExec(
           """
       }
     } else ""
+
     s"""
       if (!$initAgg) {
         $initAgg = true;
@@ -974,17 +1096,19 @@ case class SnappyHashAggregateExec(
       }
       $allocatorClass $allocatorTerm = $gfeCacheImplClass.
                       getCurrentBufferAllocator();
-      ${byteBufferAccessor.initKeyOrBufferVal(aggBuffDataTypes, aggregateBufferVars)}
-      ${byteBufferAccessor.initKeyOrBufferVal(keysDataType, KeyBufferVars)}
+      ${byteBufferAccessor.initKeyOrBufferVal(aggBuffDataTypes, aggregateBufferVars,
+        genClassField = true)}
+      ${byteBufferAccessor.initKeyOrBufferVal(keysDataType, KeyBufferVars, genClassField = true)}
       ${SHAMapAccessor.initNullBitsetCode(nullKeysBitsetTerm, numBytesForNullKeyBits, ctx)}
       ${SHAMapAccessor.initNullBitsetCode(nullAggsBitsetTerm, numBytesForNullAggsBits, ctx)}
       ${KeyBufferVars.zip(keysDataType).map {
           case (varName, dataType) => dataType match {
-          case st: StructType =>
-            recursiveApply(nestedStructNullBitsTermInitializer)(varName, st, 0).toString
-          case _ => ""
-        }
-      }.mkString("\n")}
+            case st: StructType =>
+              recursiveApply(nestedStructNullBitsTermInitializer)(varName, st, 0).toString
+            case _ => ""
+          }
+        }.mkString("\n")
+      }
 
       // output the result
       while($setBBMap()) {
@@ -992,7 +1116,7 @@ case class SnappyHashAggregateExec(
         $vdBaseObjectTerm = $valueDataTerm.baseObject();
         long $endIterValueOffset = $hashMapTerm.valueDataSize() + $valueDataTerm.baseOffset();
         long $localIterValueOffsetTerm = $iterValueOffsetTerm;
-        ${byteBufferAccessor.declareNullVarsForAggBuffer(aggregateBufferVars)}
+        ${byteBufferAccessor.declareNullVarsForAggBuffer(aggregateBufferVars, genClassField = true)}
         int $localNumRowsIterated = 0;
         while ($localIterValueOffsetTerm != $endIterValueOffset) {
           ++$localNumRowsIterated;
@@ -1129,8 +1253,38 @@ case class SnappyHashAggregateExec(
   }
 
   private def doConsumeWithKeysForSHAMap(ctx: CodegenContext,
-    input: Seq[ExprCode]): String = {
+    inputTemp: Seq[ExprCode]): String = {
+    val aggBuffDataTypes = this.aggregateBufferAttributesForGroup.map(_.dataType)
 
+    val input = if (splitAggCode) {
+      // if aggregate functions code is to be spiltted, create two arrays ( Object & boolean)
+      // to transfer all the  incoming input variables into those array
+      // & modify the variable names such that the newly created Object array & boolean array
+      // are used.
+      val inputValTransferArray = internals.addClassField(ctx, "Object[]",
+        "inputValTransferArray", v => s"$v = new Object[${inputTemp.length}];")
+      val inputNullTransferArray = internals.addClassField(ctx, "boolean[]",
+        "inputNullTransferArray", v => s"$v = new boolean[${inputTemp.length}];")
+
+      inputTemp.zip(this.child.output.map(_.dataType)).zipWithIndex.map {
+        case ((exprCode, dt), index) =>
+          val origCode = exprCode.code
+          val javaType = internals.javaType(dt, ctx)
+          val castType = if (SHAMapAccessor.isPrimitive(dt)) {
+            SHAMapAccessor.getObjectTypeForPrimitiveType(javaType)
+          } else {
+            javaType
+          }
+          val newCode = s"""$origCode
+                           |$inputNullTransferArray[$index] = ${exprCode.isNull};
+                           |$inputValTransferArray[$index] = ${exprCode.value};
+             """.stripMargin
+          internals.newExprCode(newCode, s"$inputNullTransferArray[$index]",
+            s"(($castType)$inputValTransferArray[$index])", dt)
+      }
+    } else {
+      inputTemp
+    }
 
     // only have DeclarativeAggregate
     val updateExpr = aggregateExpressions.flatMap { e =>
@@ -1144,10 +1298,51 @@ case class SnappyHashAggregateExec(
       }
     }
 
+    val aggFuncDependentOnGroupByKey = updateExpr.flatMap(_.references).
+        intersect(this.groupingExpressions.flatMap(_.references)).nonEmpty
+
     val evaluatedInputCode = evaluateVariables(input)
+
     ctx.currentVars = input
     val keysExpr = ctx.generateExpressions(
       groupingExpressions.map(e => BindReferences.bindReference[Expression](e, child.output)))
+
+    val dictionaryCode = SHAMapAccessor.initDictionaryCodeForSingleKeyCase(input,
+      byteBufferAccessor.keyExprs, child.output, ctx, byteBufferAccessor.session)
+
+    dictionaryCode match {
+      case Some(d@DictionaryCode(dictionary, _, _)) =>
+        // initialize or reuse the array at batch level for join
+        // null key will be placed at the last index of dictionary
+        // and dictionary index will be initialized to that by ColumnTableScan
+        // A 1 value return value means dictionary was initialized with not null, 0 means null
+        internals.addClassField(ctx, classOf[StringDictionary].getName, dictionary.value,
+          forceInline = true, useFreshName = false)
+        dictionaryArrayTerm = internals.addClassField(ctx, "long []",
+          "dictionaryArray", v => s"$v = null;")
+
+        internals.addFunction(ctx, dictionaryArrayInit,
+          s"""
+             |public void $dictionaryArrayInit() {
+             |  ${d.evaluateDictionaryCode()}
+             |  if (${d.dictionary.isNull}) {
+             |    $dictionaryArrayTerm = null;
+             |  } else {
+             |   int temp = ${d.dictionary.value}.size();
+             |    if ($dictionaryArrayTerm == null || $dictionaryArrayTerm.length < temp) {
+             |      $dictionaryArrayTerm = new long[temp];
+             |    } else {
+             |       for (int i = 0; i < temp; ++i) {
+             |         $dictionaryArrayTerm[i] = 0;
+             |       }
+             |    }
+             |    $dictionaryArraySizeField = temp;
+             |  }
+             |}
+          """.stripMargin, inlineToOuterClass = true)
+      case None =>
+    }
+
     // generate class for key, buffer and hash code evaluation of key columns
     val inputAttr = aggregateBufferAttributesForGroup ++ child.output
     val initVars = ctx.generateExpressions(declFunctions.flatMap(
@@ -1155,45 +1350,184 @@ case class SnappyHashAggregateExec(
         inputAttr))))
     val initCode = evaluateVariables(initVars)
     val keysDataType = this.groupingAttributes.map(_.dataType)
-    val aggBuffDataTypes = this.aggregateBufferAttributesForGroup.map(_.dataType)
-
 
     // if aggregate expressions uses some of the key variables then signal those
     // to be materialized explicitly for the dictionary optimization case (AQP-292)
     val updateAttrs = AttributeSet(updateExpr)
     // evaluate map lookup code before updateEvals possibly modifies the keyVars
-    val mapCode = byteBufferAccessor.generateMapGetOrInsert(initVars, initCode, evaluatedInputCode,
-      keysExpr, keysDataType, aggBuffDataTypes)
+    val mapCode = byteBufferAccessor.generateMapGetOrInsert(evaluatedInputCode,
+      keysExpr, keysDataType, dictionaryCode, dictionaryArrayTerm,
+      dictionaryArraySize, aggFuncDependentOnGroupByKey)
 
-    val bufferVars = byteBufferAccessor.getBufferVars(aggBuffDataTypes,
-      byteBufferAccessor.aggregateBufferVars,
-      byteBufferAccessor.currentOffSetForMapLookupUpdt, isKey = false,
-      byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits,
-      skipNullBitsCode = false)
-    val bufferEval = evaluateVariables(bufferVars)
+    // declare & initialize the buffer variables
     val bufferVarsFromInitVars = byteBufferAccessor.aggregateBufferVars.indices.map { i =>
       val bufferVarName = byteBufferAccessor.aggregateBufferVars(i)
       val initEv = initVars(i)
+      val dt = aggBuffDataTypes(i)
       internals.newExprCode(code =
           s"""
-             |$bufferVarName${SHAMapAccessor.nullVarSuffix} = ${internals.exprCodeIsNull(initEv)};
-             |$bufferVarName = ${internals.exprCodeValue(initEv)};""".stripMargin,
-        isNull = s"$bufferVarName${SHAMapAccessor.nullVarSuffix}", value = bufferVarName,
-        aggBuffDataTypes(i))
+             |boolean $bufferVarName${SHAMapAccessor.nullVarSuffix} =
+             |  ${internals.exprCodeIsNull(initEv)};
+             |${internals.javaType(dt, ctx)} $bufferVarName =
+             |  ${internals.exprCodeValue(initEv)};""".stripMargin,
+        isNull = s"$bufferVarName${SHAMapAccessor.nullVarSuffix}", value = bufferVarName, dt)
     }
     val bufferEvalFromInitVars = evaluateVariables(bufferVarsFromInitVars)
+
+    val (stateArrayVarOpt, bufferVars) = byteBufferAccessor.readVarsFromBBMap(aggBuffDataTypes,
+      byteBufferAccessor.aggregateBufferVars,
+      byteBufferAccessor.currentOffSetForMapLookupUpdt, isKey = false,
+      byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits,
+      skipNullBitsCode = false, splitAggCode, None)
+
+    val bufferEval = evaluateVariables(bufferVars)
+
     ctx.currentVars = bufferVars ++ input
     // pre-evaluate input variables used by child expressions and updateExpr
     val inputCodes = evaluateRequiredVariables(child.output,
       ctx.currentVars.takeRight(child.output.length),
       child.references ++ updateAttrs)
+
     val boundUpdateExpr = updateExpr.map(BindReferences.bindReference(_,
       inputAttr))
-    val subExprs = ctx.subexpressionEliminationForWholeStageCodegen(
-      boundUpdateExpr)
-    val effectiveCodes = subExprs.codes.mkString("\n")
-    val updateEvals = ctx.withSubExprEliminationExprs(subExprs.states) {
-      boundUpdateExpr.map(_.genCode(ctx))
+
+    val evaluateAggregateAndUpdateBuffer = if (splitAggCode) {
+
+      // for each specific update expression identify the input vars & buffer variables
+      // to which it is dependent. those will become parameters to the function for evaluation
+
+      val booleanStateTransferVar = internals.addClassField(ctx, "boolean[]",
+        "stateTransferBoolean", v => s"$v = new boolean[1];")
+
+      // find the buffer variables on which the update expression is dependent
+      // these buffer variables need to be passed to the split function
+      val funcParamVars = boundUpdateExpr.map(expr => expr.collect {
+        case br: BoundReference if br.ordinal < bufferVars.length => (br.ordinal, br.dataType)
+      }.distinct.map { case (i, dt) =>
+        val tempExpr = ctx.currentVars(i)
+        val tempIsNull = internals.exprCodeIsNull(tempExpr)
+        val modExpr = if (tempIsNull.isEmpty || tempIsNull == "true" || tempIsNull == "false") {
+          val code = tempExpr.code
+          val tempName = ctx.freshName("isNull")
+          val boolCode = s"boolean $tempName = $tempIsNull;"
+          internals.copyExprCode(tempExpr, isNull = tempName, code = s"$code\n$boolCode")
+        } else tempExpr
+        modExpr -> dt
+      })
+
+      val (codes, updtVars) = boundUpdateExpr.zip(funcParamVars).map {
+        case (singleBoundUpdtExpr, varsForUpdate) =>
+          val methodParams = varsForUpdate.map {
+            case (exprCode, dt) => s"${internals.javaType(dt, ctx)} ${exprCode.value}," +
+              s" boolean ${exprCode.isNull}"
+          }.mkString("", ",", s", boolean[] $booleanStateTransferVar")
+          val singleUpdtExprC = {
+            val var1 = singleBoundUpdtExpr.genCode(ctx)
+            val v1IsNull = internals.exprCodeIsNull(var1)
+            if (v1IsNull.isEmpty || v1IsNull == "true" || v1IsNull == "false") {
+              val tempBool = ctx.freshName("isNull")
+              val boolCode = s"boolean $tempBool = ${if (v1IsNull.isEmpty) "false" else v1IsNull};"
+              internals.copyExprCode(var1, code = s"${var1.code}\n$boolCode", isNull = tempBool)
+            } else var1
+          }
+          val methodBody =
+            s"""${evaluateVariables(Seq(singleUpdtExprC))}
+               |$booleanStateTransferVar[0] = ${singleUpdtExprC.isNull};
+               |return ${singleUpdtExprC.value};
+            """.stripMargin
+          var functName = ctx.freshName("evaluateUpdate")
+          functName = internals.addFunction(ctx, functName,
+            s"""
+               |private ${internals.javaType(singleBoundUpdtExpr.dataType, ctx)} $functName(
+               |    $methodParams) {
+               |  $methodBody
+               |}
+            """.stripMargin)
+          val args = varsForUpdate.map {
+            case (exprCode, _) => s"${exprCode.value}, ${exprCode.isNull}"
+          }.mkString("", ",", s", $booleanStateTransferVar")
+
+          s"""|${evaluateVariables(varsForUpdate.map(_._1))}
+              |${internals.javaType(singleBoundUpdtExpr.dataType, ctx)} ${singleUpdtExprC.value} =
+              |    $functName($args);
+              |boolean ${singleUpdtExprC.isNull} = $booleanStateTransferVar[0];
+          """.stripMargin -> singleUpdtExprC
+      }.unzip
+
+      s"""
+         |${codes.mkString("")}
+         |// generate update
+         |${byteBufferAccessor.generateUpdate(updtVars, aggBuffDataTypes)}
+      """.stripMargin
+    } else {
+      val subExprs = ctx.subexpressionEliminationForWholeStageCodegen(
+        boundUpdateExpr)
+      val effectiveCodes = subExprs.codes.mkString("")
+      val updateEvals = ctx.withSubExprEliminationExprs(subExprs.states) {
+        boundUpdateExpr.map(_.genCode(ctx))
+      }
+      s"""
+         |$effectiveCodes
+         |// evaluate aggregate functions
+         |${evaluateVariables(updateEvals)}
+         |// generate update
+         |${byteBufferAccessor.generateUpdate(updateEvals, aggBuffDataTypes)}
+       """.stripMargin
+    }
+
+    val initBufferAndEvaluateAggregateAndUpdateCode =
+      s"""
+         |$initCode
+         |// declare buffer fields & initialize with default init values
+         |$bufferEvalFromInitVars
+         |if (${byteBufferAccessor.keyExistedTerm}) {
+         |  ${byteBufferAccessor.readNullBitsCode(byteBufferAccessor.currentOffSetForMapLookupUpdt,
+             byteBufferAccessor.nullAggsBitsetTerm, byteBufferAccessor.numBytesForNullAggBits)}
+         |  ${stateArrayVarOpt.map(stateArrayVar =>
+                s"$stateArrayVar[0] = ${byteBufferAccessor.currentOffSetForMapLookupUpdt};"
+              ).getOrElse("")}
+         |  $bufferEval
+         |  ${stateArrayVarOpt.map(stateArrayVar =>
+                s"${byteBufferAccessor.currentOffSetForMapLookupUpdt} = (Long)$stateArrayVar[0];"
+              ).getOrElse("")}
+         |}
+         |// reset the  offset position to start of values for writing update
+         |${byteBufferAccessor.currentOffSetForMapLookupUpdt} =
+         |    ${byteBufferAccessor.valueOffsetTerm};
+         |// common sub-expressions
+         |$inputCodes
+         |$evaluateAggregateAndUpdateBuffer
+      """.stripMargin
+
+    val updateCode = if (splitAggCode) {
+      val nullAggBitsCastTerm = if (SHAMapAccessor.
+        isByteArrayNeededForNullBits(byteBufferAccessor.numBytesForNullAggBits)) {
+        "byte[]"
+      } else SHAMapAccessor.getNullBitsCastTerm(byteBufferAccessor.numBytesForNullAggBits)
+
+      var doAgg_1 = ctx.freshName("doAgg_1")
+      val methodParams =
+        s"""boolean ${byteBufferAccessor.keyExistedTerm},
+            long ${byteBufferAccessor.currentOffSetForMapLookupUpdt},
+            long  ${byteBufferAccessor.valueOffsetTerm},
+            Object ${byteBufferAccessor.vdBaseObjectTerm},
+            $nullAggBitsCastTerm ${byteBufferAccessor.nullAggsBitsetTerm}
+        """
+      doAgg_1 = internals.addFunction(ctx, doAgg_1,
+        s"""
+           |private void $doAgg_1($methodParams) {
+             |$initBufferAndEvaluateAggregateAndUpdateCode
+           |}
+        """.stripMargin)
+
+      s"""$doAgg_1(${byteBufferAccessor.keyExistedTerm},
+           ${byteBufferAccessor.currentOffSetForMapLookupUpdt},
+           ${byteBufferAccessor.valueOffsetTerm}, ${byteBufferAccessor.vdBaseObjectTerm},
+           ${byteBufferAccessor.nullAggsBitsetTerm}
+        );
+       """
+    } else {
+      initBufferAndEvaluateAggregateAndUpdateCode
     }
 
     // We first generate code to probe and update the hash map. If the probe is
@@ -1205,28 +1539,13 @@ case class SnappyHashAggregateExec(
     // Finally, sort the spilled aggregate buffers by key, and merge
     // them together for same key.
     s"""
+       |// Insert the group by key if it does not exist or return the offset of the start
+       |// of the value bytes
        |$mapCode
-       |// initialization for buffer fields from the hashmap
-       |if (${byteBufferAccessor.keyExistedTerm}) {
-       |  ${
-            byteBufferAccessor.readNullBitsCode(byteBufferAccessor.
-            currentOffSetForMapLookupUpdt, byteBufferAccessor.nullAggsBitsetTerm,
-            byteBufferAccessor.numBytesForNullAggBits)
-          }
-          |$bufferEval
-       |} else {
-       |  $bufferEvalFromInitVars
-       |}
-       | // reset the  offset position to start of values for writing update
-       |${byteBufferAccessor.currentOffSetForMapLookupUpdt} = ${byteBufferAccessor.valueOffsetTerm};
-       | // common sub-expressions
-       |$inputCodes
-       |$effectiveCodes
-       |
-       |// evaluate aggregate functions
-       |${evaluateVariables(updateEvals)}
-       |// generate update
-       |${byteBufferAccessor.generateUpdate(updateEvals, aggBuffDataTypes)}
+       |// declare buffer fields & initialize with default init values
+       |// Evaluate the aggregate functions & write it to the value buffer
+       |$updateCode
+
       """.stripMargin
   }
 

@@ -68,12 +68,11 @@ case class ColumnDeleteExec(child: SparkPlan, columnTable: String,
 
   override protected def doProduce(ctx: CodegenContext): String = {
     val sql = new StringBuilder
-    sql.append("DELETE FROM ").append(quotedName(resolvedName, escapeQuotes = true))
+    sql.append("DELETE FROM ").append(quotedName(resolvedName))
         .append(" WHERE ")
     // only the ordinalId is required apart from partitioning columns
     if (keyColumns.length > 4) {
-      JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.dropRight(4).map(_.name),
-        escapeQuotes = true)
+      JdbcExtendedUtils.fillColumnsClause(sql, keyColumns.dropRight(4).map(_.name))
       sql.append(" AND ")
     }
     sql.append(StoreUtils.ROWID_COLUMN_NAME).append("=?")

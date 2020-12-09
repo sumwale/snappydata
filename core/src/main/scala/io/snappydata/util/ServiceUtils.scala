@@ -24,7 +24,7 @@ import scala.collection.JavaConverters._
 
 import _root_.com.gemstone.gemfire.distributed.DistributedMember
 import _root_.com.gemstone.gemfire.distributed.internal.DistributionConfig
-import _root_.com.gemstone.gemfire.distributed.internal.DistributionConfig.ENABLE_NETWORK_PARTITION_DETECTION_NAME
+import _root_.com.gemstone.gemfire.internal.cache.CacheServerLauncher
 import _root_.com.gemstone.gemfire.internal.shared.ClientSharedUtils
 import _root_.com.pivotal.gemfirexd.internal.engine.GfxdConstants
 import _root_.com.pivotal.gemfirexd.internal.engine.distributed.utils.GemFireXDUtils
@@ -41,7 +41,7 @@ import org.apache.spark.{SparkContext, SparkEnv}
  */
 object ServiceUtils {
 
-  val LOCATOR_URL_PATTERN: Pattern = Pattern.compile("(.+:[0-9]+)|(.+\\[[0-9]+\\])")
+  val LOCATOR_URL_PATTERN: Pattern = Pattern.compile("(.+:[0-9]+)|(.+\\[[0-9]+])")
 
   private[snappydata] def getStoreProperties(
       confProps: Seq[(String, String)], forInit: Boolean = false): Properties = {
@@ -73,8 +73,15 @@ object ServiceUtils {
     if (!forLocator) {
       // set default recovery delay to 2 minutes (SNAP-1541)
       storeProps.putIfAbsent(GfxdConstants.DEFAULT_STARTUP_RECOVERY_DELAY_PROP, "120000")
-      // try hard to maintain executor and node locality
-      storeProps.putIfAbsent("spark.locality.wait.process", "20s")
+      val isRecoveryMode = props.getProperty(GfxdConstants.SNAPPY_PREFIX +
+          CacheServerLauncher.RECOVER)
+      if ((isRecoveryMode ne null) && isRecoveryMode.equalsIgnoreCase("true")) {
+        // It is crucial to enforce process locality in case of recovery mode
+        storeProps.putIfAbsent("spark.locality.wait.process", "1800s")
+      } else {
+        // try hard to maintain executor and node locality
+        storeProps.putIfAbsent("spark.locality.wait.process", "20s")
+      }
       storeProps.putIfAbsent("spark.locality.wait", "10s")
       // default value for spark.sql.files.maxPartitionBytes in snappy is 32mb
       storeProps.putIfAbsent("spark.sql.files.maxPartitionBytes", "33554432")
@@ -95,7 +102,7 @@ object ServiceUtils {
     // set default member-timeout higher for GC pauses (SNAP-1777)
     storeProps.putIfAbsent(DistributionConfig.MEMBER_TIMEOUT_NAME, "30000")
     // set network partition detection by default
-    storeProps.putIfAbsent(ENABLE_NETWORK_PARTITION_DETECTION_NAME, "true")
+    storeProps.putIfAbsent(DistributionConfig.ENABLE_NETWORK_PARTITION_DETECTION_NAME, "true")
     storeProps
   }
 
@@ -126,11 +133,11 @@ object ServiceUtils {
     }
   }
 
-  def invokeStopFabricServer(sc: SparkContext, shutDownCreds: Properties = null): Unit = {
+  def invokeStopFabricServer(shutDownCreds: Properties): Unit = {
     ServerManager.getServerInstance.stop(shutDownCreds)
   }
 
-  def getAllLocators(sc: SparkContext): scala.collection.Map[DistributedMember, String] = {
+  def getAllLocators: scala.collection.Map[DistributedMember, String] = {
     val advisor = GemFireXDUtils.getGfxdAdvisor
     val locators = advisor.adviseLocators(null)
     val locatorServers = scala.collection.mutable.HashMap[DistributedMember, String]()
@@ -141,8 +148,8 @@ object ServiceUtils {
     locatorServers
   }
 
-  def getLocatorJDBCURL(sc: SparkContext): String = {
-    val locatorUrl = getAllLocators(sc).filter(x => x._2 != null && !x._2.isEmpty)
+  def getLocatorJDBCURL: String = {
+    val locatorUrl = getAllLocators.filter(x => x._2 != null && !x._2.isEmpty)
         .map(locator => {
           org.apache.spark.sql.collection.Utils.getClientHostPort(locator._2)
         }).mkString(",")
@@ -170,5 +177,41 @@ object ServiceUtils {
           case _: Throwable => false
         }
     }
+  }
+
+  /**
+   * We capture table ddl string and add it to table properties before adding to catalog.
+   * This will also contain passwords in the string such as jdbc connection string or
+   * s3 location etc. This method masks passwords
+   *
+   * @param str DDL string that might contain jdbc/s3 passwords
+   * @return similar string with masked passwords
+   */
+  def maskPasswordsInString(str: String): String = {
+    val jdbcPattern1 = ".*jdbc.*(?i)\\bpassword\\b=([^);&']*).*".r
+    val jdbcPattern2 = ".*jdbc.*:(.*)@.*".r
+    val s3Pattern1 = "s3[an]?://([^:]*):([^@]*)@.*".r
+    val optionPattern1 = ".*(?i)\\bpassword\\b '([^']*)'.*".r
+    var maskedStr = str.replace("\n", " ")
+    val mask = "xxxxx"
+
+    maskedStr match {
+      case jdbcPattern1(passwd) => maskedStr = maskedStr.replace(passwd, mask)
+      case _ =>
+    }
+    maskedStr match {
+      case jdbcPattern2(passwd) => maskedStr = maskedStr.replace(passwd, mask)
+      case _ =>
+    }
+    maskedStr match {
+      case s3Pattern1(passwd3, passwd4) => maskedStr = maskedStr.replace(passwd3, mask)
+          .replace(passwd4, mask)
+      case _ =>
+    }
+    maskedStr match {
+      case optionPattern1(passwd) => maskedStr = maskedStr.replace(passwd, mask)
+      case _ =>
+    }
+    maskedStr
   }
 }

@@ -35,21 +35,27 @@ import org.apache.spark.status.ElementTrackingStore
  * to display properly in the UI (CachedDataFrame already takes care of posting
  * the SQL string rather than method name unlike Spark).
  */
-class SnappySQLAppListener(conf: SparkConf, kvStore: ElementTrackingStore)
+class SnappySQLAppListener(conf: SparkConf, kvStore: ElementTrackingStore,
+    originalListener: Option[SQLAppStatusListener] = None)
     extends SQLAppStatusListener(conf, kvStore, live = true) {
 
-  private[this] val baseLiveExecutions: ConcurrentMap[Long, LiveExecutionData] = {
-    val f = classOf[SQLAppStatusListener].getDeclaredFields
-        .find(_.getName.contains("liveExecutions")).get
+  private[this] val baseFields = classOf[SQLAppStatusListener].getDeclaredFields.toIndexedSeq
+
+  private[this] def internalBaseMapField[K, V](fieldName: String): ConcurrentMap[K, V] = {
+    val f = baseFields.find(_.getName.contains(fieldName)).get
     f.setAccessible(true)
-    f.get(this).asInstanceOf[ConcurrentMap[Long, LiveExecutionData]]
+    val m = f.get(this).asInstanceOf[ConcurrentMap[K, V]]
+    originalListener match {
+      case Some(l) => m.putAll(f.get(l).asInstanceOf[ConcurrentMap[K, V]])
+      case _ =>
+    }
+    m
   }
-  private[this] val baseStageMetrics: ConcurrentMap[Int, LiveStageMetrics] = {
-    val f = classOf[SQLAppStatusListener].getDeclaredFields
-        .find(_.getName.contains("stageMetrics")).get
-    f.setAccessible(true)
-    f.get(this).asInstanceOf[ConcurrentMap[Int, LiveStageMetrics]]
-  }
+
+  private[this] val baseLiveExecutions: ConcurrentMap[Long, LiveExecutionData] =
+    internalBaseMapField[Long, LiveExecutionData]("liveExecutions")
+  private[this] val baseStageMetrics: ConcurrentMap[Int, LiveStageMetrics] =
+    internalBaseMapField[Int, LiveStageMetrics]("stageMetrics")
 
   /**
    * Executions whose planning stage has ended but execution hasn't started.
