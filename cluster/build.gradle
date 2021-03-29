@@ -192,7 +192,7 @@ dependencies {
   testCompile "it.unimi.dsi:fastutil:${fastutilVersion}"
   testCompile "org.scalatest:scalatest_${scalaBinaryVersion}:${scalatestVersion}"
 
-  if (new File(rootDir, 'aqp/build.gradle').exists() && rootProject.hasProperty('snappydata.enterprise')) {
+  if (isEnterpriseProduct) {
     testRuntime project(aqpProjectName)
   }
   testRuntime files("${projectDir}/../tests/common/src/main/resources")
