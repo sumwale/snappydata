@@ -89,6 +89,7 @@ object SparkSupport extends Logging {
    * have a public constructor having current SparkContext as the one argument.
    */
   private val implementations: Map[String, String] = Map(
+    "2.4.8" -> s"$INTERNAL_PACKAGE.Spark24Internals",
     "2.4.7" -> s"$INTERNAL_PACKAGE.Spark24Internals",
     "2.4.6" -> s"$INTERNAL_PACKAGE.Spark24Internals",
     "2.4.5" -> s"$INTERNAL_PACKAGE.Spark24Internals",

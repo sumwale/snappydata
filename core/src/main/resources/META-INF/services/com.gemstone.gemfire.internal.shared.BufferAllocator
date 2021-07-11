@@ -1,1 +1,2 @@
+com.gemstone.gemfire.internal.cache.store.ManagedDirectBufferAllocator
 org.apache.spark.memory.UMMBufferAllocator

@@ -19,7 +19,7 @@ apply plugin: 'scala'
 
 compileScala.options.encoding = 'UTF-8'
 
-// directly include the base classes to ensure everything is compiled with Spark 2.4.7
+// directly include the base classes to ensure everything is compiled with Spark 2.4.8
 sourceSets.main.scala.srcDir '../spark-2.3/src/main/scala'
 sourceSets.main.scala.srcDir '../spark-2.3/src/main/java'
 sourceSets.main.scala.srcDir '../spark-2.4/src/main/scala'
@@ -28,7 +28,7 @@ sourceSets.main.java.srcDirs = []
 
 // this is current embedded version so will remain the same whether used
 // for embedded build or connector build
-String spark247Version = '2.4.7'
+String spark247Version = '2.4.8'
 
 dependencies {
   compileOnly 'org.scala-lang:scala-library:' + scalaVersion

@@ -41,7 +41,7 @@ apply plugin: "nebula.ospackage"
 def compatibilityMap = [
   '2.1.1': '2.1', '2.1.2': '2.1', '2.1.3': '2.1',
   '2.3.0': '2.3', '2.3.1': '2.3', '2.3.2': '2.3', '2.3.3': '2.3', '2.3.4': '2.3',
-  '2.4.0': '2.4', '2.4.1': '2.4', '2.4.2': '2.4', '2.4.3': '2.4', '2.4.4': '2.4', '2.4.5': '2.4', '2.4.6': '2.4', '2.4.7': '2.4.7'
+  '2.4.0': '2.4', '2.4.1': '2.4', '2.4.2': '2.4', '2.4.3': '2.4', '2.4.4': '2.4', '2.4.5': '2.4', '2.4.6': '2.4', '2.4.7': '2.4', '2.4.8': '2.4.8'
 ]
 
 allprojects {
@@ -114,9 +114,9 @@ allprojects {
     scalaBinaryVersion = '2.11'
     scalaVersion = scalaBinaryVersion + '.12'
 
-    sparkVersion = '2.4.7'
+    sparkVersion = '2.4.8'
     sparkConnectorVersion = System.getProperty('spark.connector.version', sparkVersion)
-    snappySparkVersion = '2.4.7.1'
+    snappySparkVersion = '2.4.8.1'
     coreProjectName = sparkVersion == sparkConnectorVersion
         ? ":snappy-core_${scalaBinaryVersion}" : ":snappy-core-product_${scalaBinaryVersion}"
     compatProjectName = ":snappy-core_${scalaBinaryVersion}:compat-spark${compatibilityMap[sparkVersion]}"
@@ -125,7 +125,7 @@ allprojects {
     sparkPackageName = "snappydata-${version}_${sparkConnectorVersion}-s_${scalaBinaryVersion}"
 
     sparkConnectorDistName = "spark-${sparkConnectorVersion}-bin-hadoop2.7"
-    sparkCurrentVersion = '2.4.7'
+    sparkCurrentVersion = '2.4.8'
     sparkCurrentDistName = "spark-${sparkCurrentVersion}-bin-hadoop2.7"
     log4jVersion = '1.2.17'
     slf4jVersion = '1.7.30'
@@ -135,8 +135,8 @@ allprojects {
     gcsHadoop2ConnectorVersion = 'hadoop2-2.0.0'
     gcsHadoop3ConnectorVersion = 'hadoop3-2.0.0'
     sparkXmlVersion = '0.10.0'
-    scalatestVersion = '3.0.8'
-    jettyVersion = '9.3.28.v20191105'
+    scalatestVersion = '3.0.9'
+    jettyVersion = '9.4.40.v20210413'
     guavaVersion = '14.0.1'
     kryoVersion = '4.0.2'
     thriftVersion = '0.9.3'
@@ -196,8 +196,8 @@ allprojects {
     clusterType = ''
 
     sparkJobServerVersion = '0.9.0.1'
-    eclipseCollectionsVersion = '10.1.0'
-    fastutilVersion = '8.3.1'
+    eclipseCollectionsVersion = '10.4.0'
+    fastutilVersion = '8.5.4'
     snappySparkMetricsLibVersion = '2.0.0.1'
 
     gitCmd = "git --git-dir=${rootDir}/.git --work-tree=${rootDir}"
@@ -984,7 +984,7 @@ task product(type: Zip) {
   dependsOn ":snappy-examples_${scalaBinaryVersion}:jar"
   dependsOn ":snappy-spark:snappy-spark-assembly_${scalaBinaryVersion}:sparkProduct"
   dependsOn ':snappy-launcher:jar'
-  dependsOn ':copyShadowJars'
+  dependsOn ':jdbcJar'
 
   def clusterProject = project(":snappy-cluster_${scalaBinaryVersion}")
   def launcherProject = project(':snappy-launcher')
@@ -1414,7 +1414,7 @@ task distInstallers {
 
 // use the task below to prepare final release bits
 task distProduct {
-  dependsOn product, distTar, distZip
+  dependsOn product, copyShadowJars, distTar, distZip
   dependsOn distInstallers
 }
 
